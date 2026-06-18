@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
-    <title>재고 소진 예상일 관리 (v10)</title>
+    <title>재고 소진 예상일 관리 (v12)</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -95,7 +95,6 @@
 
                         const { initializeApp } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js");
                         const { getAuth, signInAnonymously, onAuthStateChanged } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js");
-                        // v10: doc, deleteDoc 함수 추가 임포트
                         const { getFirestore, collection, onSnapshot, addDoc, doc, deleteDoc } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
 
                         const app = initializeApp(firebaseConfig);
@@ -140,7 +139,6 @@
                     
                     setHistories(data);
                     
-                    // 만약 현재 선택된 ID가 지워졌거나 없으면 가장 최신으로 세팅
                     if (data.length > 0) {
                         if (!selectedHistoryId || !data.find(h => h.id === selectedHistoryId)) {
                             setSelectedHistoryId(data[0].id);
@@ -167,11 +165,9 @@
                 }
             };
 
-            // v10: 히스토리 삭제 (모달/알림 포함)
             const handleDeleteHistory = async () => {
                 if (!firebaseRefs || !selectedHistoryId) return;
                 
-                // 삭제 전 재차 확인
                 const isConfirmed = window.confirm("현재 선택된 히스토리 내역을 완전히 삭제하시겠습니까?\n(삭제 후 복구할 수 없습니다.)");
                 if (!isConfirmed) return;
 
@@ -186,10 +182,17 @@
                 }
             };
 
+            // v11: 날짜 파싱 방어 코드 (크로스 브라우징 지원)
             const parseExcelDateString = (dateStr) => {
                 if (!dateStr) return null;
-                const d = new Date(dateStr);
+                let d = new Date(dateStr);
                 if (!isNaN(d.getTime())) return d;
+                
+                // Safari/Mac 호환을 위해 공백을 T로 치환하여 ISO 8601 형태로 강제 변환
+                const safeStr = String(dateStr).trim().replace(" ", "T");
+                d = new Date(safeStr);
+                if (!isNaN(d.getTime())) return d;
+                
                 return null;
             };
 
@@ -278,9 +281,12 @@
 
                         const nextVersion = `V${histories.length + 1}`;
                         const now = new Date().toISOString();
+                        
+                        // v11: 화면 표기를 위해 baseDate(기준일)를 DB에 같이 저장
                         const newDocData = { 
                             version: nextVersion, 
                             createdAt: now, 
+                            baseDate: baseTime,
                             items: parsedItems 
                         };
 
@@ -317,6 +323,14 @@
             const currentData = useMemo(() => {
                 return histories.find(h => h.id === selectedHistoryId) || null;
             }, [histories, selectedHistoryId]);
+
+            // v11: 사용자가 눈으로 확인할 수 있도록 정확한 날짜 구간 텍스트 생성
+            const displayDateRange = useMemo(() => {
+                if (!currentData || !currentData.baseDate) return "";
+                const end = new Date(currentData.baseDate);
+                const start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - (selectedPeriod - 1));
+                return `${start.getMonth()+1}/${start.getDate()} ~ ${end.getMonth()+1}/${end.getDate()}`;
+            }, [currentData, selectedPeriod]);
 
             const processedItems = useMemo(() => {
                 if (!currentData) return [];
@@ -455,7 +469,7 @@
                     <header className="glass-effect relative z-30 border-b border-slate-200 px-6 py-4 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
                         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
                             <h1 className="text-xl font-extrabold text-slate-800 flex items-center gap-2">
-                                📊 재고 소진 예상일 관리 <span className="text-slate-400 font-semibold text-sm">(v10)</span>
+                                📊 재고 소진 예상일 관리 <span className="text-slate-400 font-semibold text-sm">(v12)</span>
                             </h1>
                             
                             <div className="flex items-center gap-1.5 bg-slate-100 px-2.5 py-1 rounded-full w-fit">
@@ -495,16 +509,22 @@
                             <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-6 bg-white rounded-2xl shadow-sm border border-slate-200 p-6 border-l-4 border-l-indigo-500">
                                 
                                 <div className="flex flex-col gap-3">
-                                    <div>
+                                    <div className="flex items-center gap-2">
                                         <h2 className="text-lg font-bold text-slate-800">
                                             통합 분석 리포트
                                         </h2>
-                                        <p className="text-sm text-slate-500 mt-0.5">
-                                            마지막 업데이트: {formatDate(currentData.createdAt)}
-                                        </p>
+                                        {/* v11: 현재 화면에 표시되는 데이터의 정확한 집계 구간을 표시 */}
+                                        {displayDateRange && (
+                                            <span className="bg-indigo-50 border border-indigo-100 text-indigo-700 text-xs font-bold px-2 py-1 rounded-md">
+                                                🗓️ 집계구간: {displayDateRange}
+                                            </span>
+                                        )}
                                     </div>
+                                    <p className="text-sm text-slate-500">
+                                        마지막 업데이트: {formatDate(currentData.createdAt)}
+                                    </p>
 
-                                    <div className="flex items-center gap-3 bg-slate-50 p-1.5 rounded-xl border border-slate-200">
+                                    <div className="flex items-center gap-3 bg-slate-50 p-1.5 rounded-xl border border-slate-200 w-fit mt-1">
                                         <span className="text-sm font-bold text-slate-700 pl-2">분석 기준일:</span>
                                         <div className="flex gap-1">
                                             <button onClick={() => setSelectedPeriod(30)} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${selectedPeriod === 30 ? 'bg-white shadow-sm text-indigo-700 border border-slate-200' : 'text-slate-500 hover:bg-slate-200'}`}>30일</button>
@@ -514,11 +534,11 @@
                                     </div>
                                 </div>
 
-                                <div className="flex flex-wrap items-center gap-3 w-full xl:w-auto mt-2 xl:mt-0">
+                                {/* v12: 우측 영역을 flex-col로 변경하여 상단(히스토리), 하단(버튼들)으로 분리 배치 */}
+                                <div className="flex flex-col items-end gap-3 w-full xl:w-auto mt-2 xl:mt-0">
                                     
-                                    {/* v10: 히스토리 조회를 이쪽으로 옮기고 휴지통 추가 */}
                                     {histories.length > 0 && (
-                                        <div className="flex items-center gap-1.5 bg-slate-50 p-1 rounded-xl border border-slate-200 shadow-sm mr-2">
+                                        <div className="flex items-center gap-1.5 bg-slate-50 p-1 rounded-xl border border-slate-200 shadow-sm">
                                             <span className="text-sm font-bold text-slate-700 pl-2 pr-1 hidden sm:inline">히스토리:</span>
                                             <select 
                                                 className="bg-white border border-slate-300 text-slate-700 text-sm font-medium rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-full py-1.5 px-2 cursor-pointer outline-none"
@@ -541,23 +561,25 @@
                                         </div>
                                     )}
 
-                                    <button 
-                                        onClick={() => setShowWarningOnly(!showWarningOnly)}
-                                        className={`px-4 py-2.5 rounded-lg text-sm font-bold transition-colors border shadow-sm ${showWarningOnly ? 'bg-red-50 text-red-600 border-red-200' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
-                                    >
-                                        {showWarningOnly ? '전체 목록 보기' : '🚨 30일 이내 품절 예상'}
-                                    </button>
-                                    
-                                    <button 
-                                        onClick={exportToExcel}
-                                        className="px-4 py-2.5 rounded-lg text-sm font-bold bg-green-600 hover:bg-green-700 text-white transition-colors shadow-sm flex items-center gap-2"
-                                    >
-                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-                                        엑셀 다운로드
-                                    </button>
+                                    <div className="flex flex-wrap items-center justify-end gap-3 w-full">
+                                        <button 
+                                            onClick={() => setShowWarningOnly(!showWarningOnly)}
+                                            className={`px-4 py-2.5 rounded-lg text-sm font-bold transition-colors border shadow-sm ${showWarningOnly ? 'bg-red-50 text-red-600 border-red-200' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
+                                        >
+                                            {showWarningOnly ? '전체 목록 보기' : '🚨 30일 이내 품절 예상'}
+                                        </button>
+                                        
+                                        <button 
+                                            onClick={exportToExcel}
+                                            className="px-4 py-2.5 rounded-lg text-sm font-bold bg-green-600 hover:bg-green-700 text-white transition-colors shadow-sm flex items-center gap-2"
+                                        >
+                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                                            엑셀 다운로드
+                                        </button>
 
-                                    <div className="bg-slate-100 px-4 py-2.5 rounded-lg text-sm font-semibold text-slate-700 ml-auto xl:ml-0">
-                                        총 <span className="text-indigo-600">{processedItems.length}</span>개 품목
+                                        <div className="bg-slate-100 px-4 py-2.5 rounded-lg text-sm font-semibold text-slate-700">
+                                            총 <span className="text-indigo-600">{processedItems.length}</span>개 품목
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -573,7 +595,11 @@
                                                 <span className="text-right w-16 shrink-0">총재고</span>
                                             </div>
                                         </th>
-                                        <th scope="col" className="w-[18%] px-4 py-4 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-right">출고수량({selectedPeriod}일)</th>
+                                        {/* v11: 헤더에 해당 기간의 실제 달력 구간 표시 추가 */}
+                                        <th scope="col" className="w-[18%] px-4 py-3 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-right leading-tight">
+                                            출고수량({selectedPeriod}일)<br/>
+                                            {displayDateRange && <span className="text-[12px] font-bold text-slate-400 tracking-tighter">({displayDateRange})</span>}
+                                        </th>
                                         <th scope="col" className="w-[15%] px-4 py-4 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-right">일평균</th>
                                         <th scope="col" className="w-[22%] px-4 py-4 text-[15px] font-extrabold text-indigo-900 bg-indigo-100/50 border-b-2 border-indigo-200 text-right">예상 소진일</th>
                                     </tr>
