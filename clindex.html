@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
-    <title>재고 소진 예상일 관리 (v08)</title>
+    <title>재고 소진 예상일 관리 (v09)</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -191,18 +191,16 @@
                         const raw1 = XLSX.utils.sheet_to_json(ws1, { header: 1 });
                         const raw2 = XLSX.utils.sheet_to_json(ws2, { header: 1, raw: false });
 
-                        // v08: 글로벌 공통 기준일 탐색
                         let globalMaxDateObj = new Date(0);
                         raw2.forEach((row, idx) => {
                             if (idx === 0 || !row) return; 
-                            const dateStr = row[6]; // G열 (출고일시)
+                            const dateStr = row[6]; 
                             const d = parseExcelDateString(dateStr);
                             if (d && d.getTime() > globalMaxDateObj.getTime()) {
                                 globalMaxDateObj = d;
                             }
                         });
 
-                        // v08: 글로벌 최신 날짜의 23:59:59를 모든 품목의 공통 기준 시간으로 설정
                         const baseDate = new Date(globalMaxDateObj.getFullYear(), globalMaxDateObj.getMonth(), globalMaxDateObj.getDate(), 23, 59, 59, 999);
                         const baseTime = baseDate.getTime();
                         
@@ -227,7 +225,6 @@
                                 outboundMap[itemName] = { out_30: 0, out_15: 0, out_7: 0 };
                             }
                             
-                            // 글로벌 기준 시간에 맞춰 출고량 누적
                             if (dTime >= time30 && dTime <= baseTime) outboundMap[itemName].out_30 += amt;
                             if (dTime >= time15 && dTime <= baseTime) outboundMap[itemName].out_15 += amt;
                             if (dTime >= time7 && dTime <= baseTime) outboundMap[itemName].out_7 += amt;
@@ -429,13 +426,13 @@
                         </div>
                     )}
 
-                    <header className="glass-effect relative z-30 border-b border-slate-200 px-6 py-4 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                    <header className="glass-effect relative z-30 border-b border-slate-200 px-6 py-4 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
                         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
                             <h1 className="text-xl font-extrabold text-slate-800 flex items-center gap-2">
-                                📊 재고 소진 예상일 관리 <span className="text-slate-400 font-semibold text-sm">(v08)</span>
+                                📊 재고 소진 예상일 관리 <span className="text-slate-400 font-semibold text-sm">(v09)</span>
                             </h1>
                             
-                            <div className="flex items-center gap-1.5 bg-slate-100 px-2.5 py-1 rounded-full">
+                            <div className="flex items-center gap-1.5 bg-slate-100 px-2.5 py-1 rounded-full w-fit">
                                 {serverStatus === 'connected' ? (
                                     <>
                                         <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
@@ -455,22 +452,33 @@
                             </div>
                         </div>
                         
-                        {histories.length > 0 && (
-                            <div className="flex items-center gap-2 w-full sm:w-auto">
-                                <span className="text-sm font-semibold text-slate-600 whitespace-nowrap">히스토리 조회:</span>
-                                <select 
-                                    className="bg-white border border-slate-300 text-slate-700 text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-full p-2.5 font-medium shadow-sm cursor-pointer"
-                                    value={selectedHistoryId || ""}
-                                    onChange={(e) => setSelectedHistoryId(e.target.value)}
-                                >
-                                    {histories.map(h => (
-                                        <option key={h.id} value={h.id}>
-                                            {formatDate(h.createdAt)}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
-                        )}
+                        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full md:w-auto">
+                            {/* v09 신규: 로켓 & N배송 재고 현황 이동 버튼 추가 */}
+                            <a 
+                                href="https://arxotn-git.github.io/yorgo" 
+                                className="px-4 py-2 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-sm font-bold rounded-lg shadow-sm transition-colors flex justify-center items-center gap-2"
+                            >
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
+                                로켓 & N배송 재고 현황
+                            </a>
+
+                            {histories.length > 0 && (
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-slate-600 whitespace-nowrap hidden sm:inline">히스토리 조회:</span>
+                                    <select 
+                                        className="bg-white border border-slate-300 text-slate-700 text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-full p-2.5 font-medium shadow-sm cursor-pointer"
+                                        value={selectedHistoryId || ""}
+                                        onChange={(e) => setSelectedHistoryId(e.target.value)}
+                                    >
+                                        {histories.map(h => (
+                                            <option key={h.id} value={h.id}>
+                                                {formatDate(h.createdAt)}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
+                        </div>
                     </header>
 
                     <main className="flex-grow p-4 md:p-8 space-y-6 max-w-7xl mx-auto w-full">
