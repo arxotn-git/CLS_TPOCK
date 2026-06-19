@@ -64,9 +64,13 @@
             // v13 신규: 검색어 상태 관리
             const [searchTerm, setSearchTerm] = useState("");
 
-            // v15 신규: 조회 모드 및 날짜 선택 상태 관리
-            const [viewMode, setViewMode] = useState("period"); // "period" (기간별) or "daily" (일자별)
-            const [selectedDailyDate, setSelectedDailyDate] = useState(() => {
+            // v16 신규: 조회 모드 및 날짜 선택 상태 관리 (단일/다중 기간 모두 지원)
+            const [viewMode, setViewMode] = useState("period"); // "period" (기간별) or "custom" (일자 직접 지정)
+            const [customStartDate, setCustomStartDate] = useState(() => {
+                const today = new Date();
+                return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+            });
+            const [customEndDate, setCustomEndDate] = useState(() => {
                 const today = new Date();
                 return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
             });
@@ -362,8 +366,19 @@
                         availableDays = Math.floor(item.stock / daily);
                     }
 
-                    // v15: 특정 날짜 출고량 계산
-                    const dailyQty = (item.daily && selectedDailyDate && item.daily[selectedDailyDate]) ? item.daily[selectedDailyDate] : 0;
+                    // v16: 사용자 지정 기간(단일일자 또는 특정 구간) 출고량 합산
+                    let customQty = 0;
+                    if (item.daily && customStartDate && customEndDate) {
+                        // 시작일/종료일 순서가 꼬여도 안전하게 작동하도록 정렬
+                        const start = customStartDate <= customEndDate ? customStartDate : customEndDate;
+                        const end = customStartDate <= customEndDate ? customEndDate : customStartDate;
+                        
+                        Object.keys(item.daily).forEach(dateKey => {
+                            if (dateKey >= start && dateKey <= end) {
+                                customQty += item.daily[dateKey];
+                            }
+                        });
+                    }
 
                     let mainGroup = null;
                     let displayName = item.itemName; 
@@ -381,12 +396,12 @@
                         _periodToUse: periodToUse,
                         _mainGroup: mainGroup,
                         _displayName: displayName,
-                        _dailyQty: dailyQty // v15 신규 추가
+                        _customQty: customQty // v16 신규 추가
                     };
                 }).filter(item => {
                     if (!item._mainGroup) return false;
 
-                    // v15: 기간별 분석 모드일 때만 품절 예상 필터 적용
+                    // v16: 기간별 분석 모드일 때만 품절 예상 필터 적용
                     if (viewMode === 'period' && showWarningOnly) {
                         if (!(item._availableDays !== null && item._availableDays < 30 && item.stock > 0)) return false;
                     }
@@ -397,7 +412,7 @@
 
                     return true;
                 });
-            }, [currentData, showWarningOnly, selectedPeriod, searchTerm, viewMode, selectedDailyDate]);
+            }, [currentData, showWarningOnly, selectedPeriod, searchTerm, viewMode, customStartDate, customEndDate]);
 
             const exportToExcel = () => {
                 if (!processedItems || processedItems.length === 0) {
@@ -405,7 +420,7 @@
                     return;
                 }
 
-                // v15: 조회 모드에 따라 엑셀 데이터 구조 분리
+                // v16: 조회 모드에 따라 엑셀 데이터 구조 분리 (라벨링 동적 처리)
                 const exportData = processedItems.map(item => {
                     if (viewMode === 'period') {
                         return {
@@ -416,10 +431,11 @@
                             "예상 소진일(일)": item._availableDays === null ? "출고 없음" : item._availableDays
                         };
                     } else {
+                        const dateLabel = customStartDate === customEndDate ? customStartDate : `${customStartDate} ~ ${customEndDate}`;
                         return {
                             "상품명": item._displayName,
                             "총재고": item.stock,
-                            [`${selectedDailyDate} 출고수량`]: item._dailyQty
+                            [`${dateLabel} 출고수량`]: item._customQty
                         };
                     }
                 });
@@ -427,17 +443,17 @@
                 const worksheet = XLSX.utils.json_to_sheet(exportData);
                 const workbook = XLSX.utils.book_new();
                 
-                // v15: 모드에 따른 열 너비 조정
+                // v16: 모드에 따른 열 너비 조정
                 const wscols = viewMode === 'period' 
                     ? [{wch: 40}, {wch: 15}, {wch: 15}, {wch: 15}, {wch: 20}] 
-                    : [{wch: 40}, {wch: 15}, {wch: 20}];
+                    : [{wch: 40}, {wch: 15}, {wch: 30}];
                 worksheet['!cols'] = wscols;
 
                 XLSX.utils.book_append_sheet(workbook, worksheet, "재고소진예상일");
                 
                 const fileName = viewMode === 'period'
                     ? `재고소진분석_${getFileNameDate(currentData.createdAt)}.xlsx`
-                    : `일별출고조회_${selectedDailyDate.replace(/-/g, '')}.xlsx`;
+                    : `지정일출고조회_${customStartDate.replace(/-/g, '')}_${customEndDate.replace(/-/g, '')}.xlsx`;
                     
                 XLSX.writeFile(workbook, fileName);
             };
@@ -503,7 +519,7 @@
                     <header className="glass-effect relative z-30 border-b border-slate-200 px-6 py-4 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
                         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
                             <h1 className="text-xl font-extrabold text-slate-800 flex items-center gap-2">
-                                📊 CL 시스템 재고 관리 <span className="text-slate-400 font-semibold text-sm">(v14)</span>
+                                📊 CL 시스템 재고 관리 <span className="text-slate-400 font-semibold text-sm">(v16)</span>
                             </h1>
                             
                             <div className="flex items-center gap-1.5 bg-slate-100 px-2.5 py-1 rounded-full w-fit">
@@ -557,11 +573,11 @@
                                         마지막 업데이트: {formatDate(currentData.createdAt)}
                                     </p>
 
-                                    {/* v15 신규: 탭 버튼퍼블리싱 */}
+                                    {/* v16 신규: 탭 버튼퍼블리싱 및 범위형 달력 기능 */}
                                     <div className="flex flex-col gap-3 mt-1">
                                         <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl w-fit">
                                             <button onClick={() => setViewMode('period')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'period' ? 'bg-white shadow-sm text-indigo-700' : 'text-slate-500 hover:text-slate-800'}`}>기간별 분석</button>
-                                            <button onClick={() => setViewMode('daily')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'daily' ? 'bg-white shadow-sm text-indigo-700' : 'text-slate-500 hover:text-slate-800'}`}>특정일 조회</button>
+                                            <button onClick={() => setViewMode('custom')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'custom' ? 'bg-white shadow-sm text-indigo-700' : 'text-slate-500 hover:text-slate-800'}`}>일자 직접 지정</button>
                                         </div>
 
                                         <div className="flex flex-wrap items-center gap-3">
@@ -575,14 +591,23 @@
                                                     </div>
                                                 </div>
                                             ) : (
-                                                <div className="flex items-center gap-3 bg-indigo-50/50 p-1.5 rounded-xl border border-indigo-200 w-fit">
-                                                    <span className="text-sm font-bold text-indigo-800 pl-2">출고일 선택:</span>
-                                                    <input 
-                                                        type="date" 
-                                                        value={selectedDailyDate} 
-                                                        onChange={(e) => setSelectedDailyDate(e.target.value)} 
-                                                        className="px-3 py-1.5 bg-white border border-indigo-200 rounded-lg text-sm font-bold text-indigo-700 outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
-                                                    />
+                                                <div className="flex items-center gap-2 bg-indigo-50/50 p-1.5 rounded-xl border border-indigo-200 w-fit">
+                                                    <span className="text-sm font-bold text-indigo-800 pl-2">출고일 구간:</span>
+                                                    <div className="flex items-center gap-1.5 pr-1">
+                                                        <input 
+                                                            type="date" 
+                                                            value={customStartDate} 
+                                                            onChange={(e) => setCustomStartDate(e.target.value)} 
+                                                            className="px-3 py-1.5 bg-white border border-indigo-200 rounded-lg text-sm font-bold text-indigo-700 outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
+                                                        />
+                                                        <span className="text-indigo-300 font-extrabold px-0.5">~</span>
+                                                        <input 
+                                                            type="date" 
+                                                            value={customEndDate} 
+                                                            onChange={(e) => setCustomEndDate(e.target.value)} 
+                                                            className="px-3 py-1.5 bg-white border border-indigo-200 rounded-lg text-sm font-bold text-indigo-700 outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
+                                                        />
+                                                    </div>
                                                 </div>
                                             )}
                                             
@@ -665,7 +690,7 @@
                                                 <span className="text-right w-16 shrink-0">총재고</span>
                                             </div>
                                         </th>
-                                        {/* v15: 뷰 모드에 따라 헤더 변경 */}
+                                        {/* v16: 뷰 모드에 따라 헤더 변경 */}
                                         {viewMode === 'period' ? (
                                             <>
                                                 <th scope="col" className="w-[18%] px-4 py-3 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-right leading-tight">
@@ -677,7 +702,7 @@
                                             </>
                                         ) : (
                                             <th scope="col" className="w-[55%] px-4 py-4 text-[15px] font-extrabold text-indigo-900 bg-indigo-50 border-b-2 border-indigo-200 text-right rounded-tr-2xl">
-                                                {selectedDailyDate || '날짜 미선택'} 출고수량
+                                                {customStartDate === customEndDate ? customStartDate : `${customStartDate} ~ ${customEndDate}`} 출고수량
                                             </th>
                                         )}
                                     </tr>
@@ -703,7 +728,7 @@
                                                                 </span>
                                                             </div>
                                                         </td>
-                                                        {/* v15: 뷰 모드에 따라 데이터 렌더링 변경 */}
+                                                        {/* v16: 뷰 모드에 따라 데이터 렌더링 분기 */}
                                                         {viewMode === 'period' ? (
                                                             <>
                                                                 <td className={`px-4 py-4 text-right font-black text-[15px] ${isWarning ? 'text-red-800' : 'text-slate-700'}`}>
@@ -722,7 +747,7 @@
                                                             </>
                                                         ) : (
                                                             <td className="px-4 py-4 text-right font-black text-[16px] text-indigo-700 bg-indigo-50/10">
-                                                                {item._dailyQty > 0 ? item._dailyQty.toLocaleString() : '-'}
+                                                                {item._customQty > 0 ? item._customQty.toLocaleString() : '-'}
                                                             </td>
                                                         )}
                                                     </tr>
