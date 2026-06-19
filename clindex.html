@@ -3,18 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
-    <title>CL 시스템 재고 관리 (v14)</title>
+    <title>CL 시스템 재고 관리 (v22)</title>
     
-    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&family=Noto+Sans+KR:wght@400;500;700;900&display=swap" rel="stylesheet">
     
-    <!-- React & Babel -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     
-    <!-- SheetJS (Excel Parsing & Exporting) -->
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
 
     <style>
@@ -58,22 +55,26 @@
             const [serverStatus, setServerStatus] = useState("connecting"); 
             const [toastMessage, setToastMessage] = useState("");
             
+            // 필터 및 뷰 모드 상태
             const [showWarningOnly, setShowWarningOnly] = useState(false);
+            const [searchKeyword, setSearchKeyword] = useState("");
+            const [viewMode, setViewMode] = useState("period"); // 'period' | 'custom'
             const [selectedPeriod, setSelectedPeriod] = useState(30);
             
-            // v13 신규: 검색어 상태 관리
-            const [searchTerm, setSearchTerm] = useState("");
+            // 달력 (일자 직접 지정) 상태
+            const [customStartDate, setCustomStartDate] = useState("");
+            const [customEndDate, setCustomEndDate] = useState("");
 
-            // v16 신규: 조회 모드 및 날짜 선택 상태 관리 (단일/다중 기간 모두 지원)
-            const [viewMode, setViewMode] = useState("period"); // "period" (기간별) or "custom" (일자 직접 지정)
-            const [customStartDate, setCustomStartDate] = useState(() => {
-                const today = new Date();
-                return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-            });
-            const [customEndDate, setCustomEndDate] = useState(() => {
-                const today = new Date();
-                return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-            });
+            useEffect(() => {
+                const handleOnline = () => setServerStatus("connected");
+                const handleOffline = () => setServerStatus("disconnected");
+                window.addEventListener("online", handleOnline);
+                window.addEventListener("offline", handleOffline);
+                return () => {
+                    window.removeEventListener("online", handleOnline);
+                    window.removeEventListener("offline", handleOffline);
+                }
+            }, []);
 
             useEffect(() => {
                 if (toastMessage) {
@@ -185,17 +186,19 @@
                 }
             };
 
-            // v11: 날짜 파싱 방어 코드 (크로스 브라우징 지원)
-            const parseExcelDateString = (dateStr) => {
-                if (!dateStr) return null;
-                let d = new Date(dateStr);
+            const parseExcelDate = (val) => {
+                if (!val) return null;
+                if (val instanceof Date) {
+                    if (!isNaN(val.getTime())) return val;
+                    return null;
+                }
+                if (typeof val === 'number') {
+                    // 엑셀 시리얼 번호를 JS Date로 변환
+                    return new Date((val - 25569) * 86400 * 1000);
+                }
+                const str = String(val).trim().replace(/\./g, '-').replace(/\//g, '-').replace(" ", "T");
+                const d = new Date(str);
                 if (!isNaN(d.getTime())) return d;
-                
-                // Safari/Mac 호환을 위해 공백을 T로 치환하여 ISO 8601 형태로 강제 변환
-                const safeStr = String(dateStr).trim().replace(" ", "T");
-                d = new Date(safeStr);
-                if (!isNaN(d.getTime())) return d;
-                
                 return null;
             };
 
@@ -209,7 +212,7 @@
                 reader.onload = async (evt) => {
                     try {
                         const bstr = evt.target.result;
-                        const wb = XLSX.read(bstr, { type: 'binary', cellDates: true, dateNF: 'yyyy-mm-dd hh:mm:ss' });
+                        const wb = XLSX.read(bstr, { type: 'binary', cellDates: true });
                         
                         if (wb.SheetNames.length < 2) {
                             alert("엑셀 파일에 시트가 2개 이상 필요합니다. (1번 시트: 현재고, 2번 시트: 출고수량)");
@@ -220,18 +223,58 @@
                         const ws1 = wb.Sheets[wb.SheetNames[0]]; 
                         const ws2 = wb.Sheets[wb.SheetNames[1]]; 
                         
-                        const raw1 = XLSX.utils.sheet_to_json(ws1, { header: 1 });
-                        const raw2 = XLSX.utils.sheet_to_json(ws2, { header: 1, raw: false });
+                        const raw1 = XLSX.utils.sheet_to_json(ws1, { header: 1, raw: true });
+                        const raw2Raw = XLSX.utils.sheet_to_json(ws2, { header: 1, raw: true });
+
+                        // v22: 동적 헤더 인덱스 추적 (열이 밀리더라도 방어)
+                        const header1 = raw1[0] || [];
+                        const header2 = raw2Raw[0] || [];
+
+                        const findIdx = (header, keywords, fallback) => {
+                            const idx = header.findIndex(col => keywords.some(k => String(col).trim() === k));
+                            return idx >= 0 ? idx : fallback;
+                        };
+
+                        const h1NameIdx = findIdx(header1, ['상품명', '자사 상품명'], 4);
+                        const h1StockIdx = findIdx(header1, ['가용재고', '현재고', '총재고'], 5); 
+
+                        const h2DateIdx = findIdx(header2, ['출고일시', '주문일'], 6);
+                        const h2NameIdx = findIdx(header2, ['자사 상품명', '상품명'], 7);
+                        const h2QtyIdx = findIdx(header2, ['출고량', '수량'], 8);
+
+                        const seenRows = new Set();
+                        const raw2 = [];
+
+                        raw2Raw.forEach((row, idx) => {
+                            if (idx === 0) {
+                                raw2.push(row); 
+                                return;
+                            }
+                            if (!row || row.length === 0) return; 
+
+                            const uniqueKey = row.map(cell => {
+                                if (cell instanceof Date) return cell.getTime();
+                                return String(cell || '').trim();
+                            }).join("|");
+
+                            if (!seenRows.has(uniqueKey)) {
+                                seenRows.add(uniqueKey);
+                                raw2.push(row);
+                            }
+                        });
 
                         let globalMaxDateObj = new Date(0);
                         raw2.forEach((row, idx) => {
                             if (idx === 0 || !row) return; 
-                            const dateStr = row[6]; 
-                            const d = parseExcelDateString(dateStr);
-                            if (d && d.getTime() > globalMaxDateObj.getTime()) {
+                            const d = parseExcelDate(row[h2DateIdx]); 
+                            if (d && !isNaN(d.getTime()) && d.getTime() > globalMaxDateObj.getTime()) {
                                 globalMaxDateObj = d;
                             }
                         });
+
+                        if (globalMaxDateObj.getTime() === 0) {
+                            globalMaxDateObj = new Date(); 
+                        }
 
                         const baseDate = new Date(globalMaxDateObj.getFullYear(), globalMaxDateObj.getMonth(), globalMaxDateObj.getDate(), 23, 59, 59, 999);
                         const baseTime = baseDate.getTime();
@@ -243,43 +286,36 @@
                         const outboundMap = {};
                         raw2.forEach((row, idx) => {
                             if (idx === 0 || !row) return;
-                            const dateStr = row[6];
-                            const itemName = row[7];
-                            const amtStr = String(row[8] || "0").replace(/,/g, '');
+                            const itemName = String(row[h2NameIdx] || '').trim();
+                            const amtStr = String(row[h2QtyIdx] || "0").replace(/,/g, '');
                             const amt = parseFloat(amtStr) || 0;
                             
                             if (!itemName) return;
-                            const d = parseExcelDateString(dateStr);
-                            if (!d) return;
+                            const d = parseExcelDate(row[h2DateIdx]);
+                            if (!d || isNaN(d.getTime())) return;
                             
                             const dTime = d.getTime();
-                            // v15: 일자별 데이터를 담기 위해 daily 객체 추가
                             if (!outboundMap[itemName]) {
                                 outboundMap[itemName] = { out_30: 0, out_15: 0, out_7: 0, daily: {} };
                             }
                             
-                            // v15: 해당 출고일자의 날짜(YYYY-MM-DD) 키 생성
-                            const dateKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-                            if (!outboundMap[itemName].daily[dateKey]) {
-                                outboundMap[itemName].daily[dateKey] = 0;
-                            }
-                            outboundMap[itemName].daily[dateKey] += amt;
-                            
                             if (dTime >= time30 && dTime <= baseTime) outboundMap[itemName].out_30 += amt;
                             if (dTime >= time15 && dTime <= baseTime) outboundMap[itemName].out_15 += amt;
                             if (dTime >= time7 && dTime <= baseTime) outboundMap[itemName].out_7 += amt;
+
+                            const dKey = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                            outboundMap[itemName].daily[dKey] = (outboundMap[itemName].daily[dKey] || 0) + amt;
                         });
 
                         const parsedItems = [];
                         raw1.forEach((row, idx) => {
                             if (idx === 0 || !row) return; 
-                            const itemName = row[4]; 
-                            const stockStr = String(row[5] || "0").replace(/,/g, '');
+                            const itemName = String(row[h1NameIdx] || '').trim(); 
+                            const stockStr = String(row[h1StockIdx] || "0").replace(/,/g, '');
                             const stock = parseFloat(stockStr) || 0; 
                             
                             if (!itemName || itemName === '상품명' || itemName === '자사 상품명') return;
                             
-                            // v15: daily 맵도 같이 넘김
                             const outData = outboundMap[itemName] || { out_30: 0, out_15: 0, out_7: 0, daily: {} };
                             
                             parsedItems.push({
@@ -288,14 +324,13 @@
                                 out_30: outData.out_30,
                                 out_15: outData.out_15,
                                 out_7: outData.out_7,
-                                daily: outData.daily || {}
+                                daily: outData.daily
                             });
                         });
 
                         const nextVersion = `V${histories.length + 1}`;
                         const now = new Date().toISOString();
                         
-                        // v11: 화면 표기를 위해 baseDate(기준일)를 DB에 같이 저장
                         const newDocData = { 
                             version: nextVersion, 
                             createdAt: now, 
@@ -309,12 +344,12 @@
                             const newDoc = await addDoc(collRef, newDocData);
                             setSelectedHistoryId(newDoc.id);
                             
-                            setToastMessage(`성공! (전체 공통 기준일: ${baseDate.toLocaleDateString()})`);
+                            setToastMessage(`성공! (스마트 열 추적 탑재 / 공통 기준일: ${baseDate.toLocaleDateString()})`);
                         }
 
                     } catch (error) {
                         console.error("Excel parse error:", error);
-                        alert("엑셀 데이터를 분석하는 중 오류가 발생했습니다. (E/F/G/H/I열 구조 확인 필요)");
+                        alert("엑셀 데이터를 분석하는 중 오류가 발생했습니다. 데이터 구조를 확인해주세요.");
                     } finally {
                         setIsUploading(false);
                         e.target.value = null;
@@ -337,27 +372,76 @@
                 return histories.find(h => h.id === selectedHistoryId) || null;
             }, [histories, selectedHistoryId]);
 
-            // v11: 사용자가 눈으로 확인할 수 있도록 정확한 날짜 구간 텍스트 생성
+            useEffect(() => {
+                if (currentData && currentData.baseDate) {
+                    const end = new Date(currentData.baseDate);
+                    const start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - 29);
+                    
+                    const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                    
+                    setCustomEndDate(fmt(end));
+                    setCustomStartDate(fmt(start));
+                }
+            }, [currentData]);
+
             const displayDateRange = useMemo(() => {
                 if (!currentData || !currentData.baseDate) return "";
-                const end = new Date(currentData.baseDate);
-                const start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - (selectedPeriod - 1));
-                return `${start.getMonth()+1}/${start.getDate()} ~ ${end.getMonth()+1}/${end.getDate()}`;
-            }, [currentData, selectedPeriod]);
+                if (viewMode === 'period') {
+                    const end = new Date(currentData.baseDate);
+                    const start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - (selectedPeriod - 1));
+                    return `${start.getMonth()+1}/${start.getDate()} ~ ${end.getMonth()+1}/${end.getDate()}`;
+                } else {
+                    if (!customStartDate || !customEndDate) return "날짜를 선택해주세요";
+                    const start = new Date(customStartDate);
+                    const end = new Date(customEndDate);
+                    
+                    if (start.getTime() === end.getTime()) {
+                        return `${start.getMonth()+1}/${start.getDate()}`;
+                    }
+                    
+                    const minDate = start < end ? start : end;
+                    const maxDate = start > end ? start : end;
+                    return `${minDate.getMonth()+1}/${minDate.getDate()} ~ ${maxDate.getMonth()+1}/${maxDate.getDate()}`;
+                }
+            }, [currentData, selectedPeriod, viewMode, customStartDate, customEndDate]);
 
             const processedItems = useMemo(() => {
                 if (!currentData) return [];
                 
+                let sTime = 0, eTime = 0;
+                if (viewMode === 'custom' && customStartDate && customEndDate) {
+                    const s = new Date(customStartDate).getTime();
+                    const eObj = new Date(customEndDate);
+                    eObj.setHours(23, 59, 59, 999);
+                    const e = eObj.getTime();
+                    sTime = Math.min(s, new Date(customEndDate).getTime());
+                    eTime = Math.max(new Date(customStartDate).setHours(23,59,59,999), e);
+                }
+
                 return currentData.items.map(item => {
-                    const isLegacy = item.out_30 === undefined;
-                    let outbound, periodToUse;
-                    
-                    if (isLegacy) {
-                        outbound = item.outbound || 0;
-                        periodToUse = currentData.period || 30; 
-                    } else {
-                        outbound = item[`out_${selectedPeriod}`] || 0;
-                        periodToUse = selectedPeriod;
+                    let outbound = 0;
+                    let periodToUse = 30;
+
+                    if (viewMode === 'period') {
+                        const isLegacy = item.out_30 === undefined;
+                        if (isLegacy) {
+                            outbound = item.outbound || 0;
+                            periodToUse = currentData.period || 30; 
+                        } else {
+                            outbound = item[`out_${selectedPeriod}`] || 0;
+                            periodToUse = selectedPeriod;
+                        }
+                    } else if (viewMode === 'custom') {
+                        if (sTime > 0 && eTime > 0 && item.daily) {
+                            let sum = 0;
+                            Object.entries(item.daily).forEach(([dStr, amt]) => {
+                                const dt = new Date(dStr).getTime();
+                                if (dt >= sTime && dt <= eTime) sum += amt;
+                            });
+                            outbound = sum;
+                            const days = Math.max(1, Math.ceil((eTime - sTime) / 86400000));
+                            periodToUse = days;
+                        }
                     }
                     
                     const daily = outbound / periodToUse;
@@ -366,23 +450,8 @@
                         availableDays = Math.floor(item.stock / daily);
                     }
 
-                    // v16: 사용자 지정 기간(단일일자 또는 특정 구간) 출고량 합산
-                    let customQty = 0;
-                    if (item.daily && customStartDate && customEndDate) {
-                        // 시작일/종료일 순서가 꼬여도 안전하게 작동하도록 정렬
-                        const start = customStartDate <= customEndDate ? customStartDate : customEndDate;
-                        const end = customStartDate <= customEndDate ? customEndDate : customStartDate;
-                        
-                        Object.keys(item.daily).forEach(dateKey => {
-                            if (dateKey >= start && dateKey <= end) {
-                                customQty += item.daily[dateKey];
-                            }
-                        });
-                    }
-
                     let mainGroup = null;
                     let displayName = item.itemName; 
-                    
                     const match = item.itemName.match(/^(\d+)/);
                     if (match) {
                         mainGroup = match[1]; 
@@ -395,24 +464,21 @@
                         _availableDays: availableDays,
                         _periodToUse: periodToUse,
                         _mainGroup: mainGroup,
-                        _displayName: displayName,
-                        _customQty: customQty // v16 신규 추가
+                        _displayName: displayName
                     };
                 }).filter(item => {
                     if (!item._mainGroup) return false;
-
-                    // v16: 기간별 분석 모드일 때만 품절 예상 필터 적용
-                    if (viewMode === 'period' && showWarningOnly) {
-                        if (!(item._availableDays !== null && item._availableDays < 30 && item.stock > 0)) return false;
-                    }
                     
-                    if (searchTerm) {
-                        if (!item._displayName.toLowerCase().includes(searchTerm.toLowerCase())) return false;
+                    if (searchKeyword && !item._displayName.toLowerCase().includes(searchKeyword.toLowerCase())) {
+                        return false;
                     }
 
+                    if (showWarningOnly) {
+                        return item._availableDays !== null && item._availableDays < 30 && item.stock > 0;
+                    }
                     return true;
                 });
-            }, [currentData, showWarningOnly, selectedPeriod, searchTerm, viewMode, customStartDate, customEndDate]);
+            }, [currentData, showWarningOnly, selectedPeriod, viewMode, customStartDate, customEndDate, searchKeyword]);
 
             const exportToExcel = () => {
                 if (!processedItems || processedItems.length === 0) {
@@ -420,45 +486,35 @@
                     return;
                 }
 
-                // v16: 조회 모드에 따라 엑셀 데이터 구조 분리 (라벨링 동적 처리)
-                const exportData = processedItems.map(item => {
-                    if (viewMode === 'period') {
-                        return {
-                            "상품명": item._displayName,
-                            "총재고": item.stock,
-                            "출고수량": item._outboundToDisplay,
-                            "일평균": item._outboundToDisplay > 0 ? item._dailyToDisplay.toFixed(1) : "-",
-                            "예상 소진일(일)": item._availableDays === null ? "출고 없음" : item._availableDays
-                        };
-                    } else {
-                        const dateLabel = customStartDate === customEndDate ? customStartDate : `${customStartDate} ~ ${customEndDate}`;
-                        return {
-                            "상품명": item._displayName,
-                            "총재고": item.stock,
-                            [`${dateLabel} 출고수량`]: item._customQty
-                        };
-                    }
-                });
+                let dynamicColName = `출고수량`;
+                if (viewMode === 'period') {
+                    dynamicColName = `출고수량(${selectedPeriod}일)`;
+                } else if (viewMode === 'custom' && customStartDate && customEndDate) {
+                    dynamicColName = `출고수량(${displayDateRange})`;
+                }
+
+                const exportData = processedItems.map(item => ({
+                    "상품명": item._displayName,
+                    "총재고": item.stock,
+                    [dynamicColName]: item._outboundToDisplay,
+                    "일평균": item._outboundToDisplay > 0 ? item._dailyToDisplay.toFixed(1) : "-",
+                    "예상 소진일(일)": item._availableDays === null ? "출고 없음" : item._availableDays
+                }));
 
                 const worksheet = XLSX.utils.json_to_sheet(exportData);
                 const workbook = XLSX.utils.book_new();
                 
-                // v16: 모드에 따른 열 너비 조정
-                const wscols = viewMode === 'period' 
-                    ? [{wch: 40}, {wch: 15}, {wch: 15}, {wch: 15}, {wch: 20}] 
-                    : [{wch: 40}, {wch: 15}, {wch: 30}];
+                const wscols = [
+                    {wch: 40}, {wch: 15}, {wch: 25}, {wch: 15}, {wch: 20}
+                ];
                 worksheet['!cols'] = wscols;
 
                 XLSX.utils.book_append_sheet(workbook, worksheet, "재고소진예상일");
                 
-                const fileName = viewMode === 'period'
-                    ? `재고소진분석_${getFileNameDate(currentData.createdAt)}.xlsx`
-                    : `지정일출고조회_${customStartDate.replace(/-/g, '')}_${customEndDate.replace(/-/g, '')}.xlsx`;
-                    
+                let rangeStr = viewMode === 'period' ? `${selectedPeriod}일` : '지정일';
+                const fileName = `재고소진분석_${rangeStr}_${getFileNameDate(currentData.createdAt)}.xlsx`;
                 XLSX.writeFile(workbook, fileName);
             };
-
-            // --- UI RENDER ---
 
             if (!isAuthenticated) {
                 return (
@@ -493,6 +549,7 @@
             return (
                 <div className="min-h-screen flex flex-col bg-slate-50 relative">
                     
+                    {/* 알림 토스트 */}
                     {toastMessage && (
                         <div 
                             className="fixed inset-0 z-50 flex justify-center items-start pt-6"
@@ -519,7 +576,7 @@
                     <header className="glass-effect relative z-30 border-b border-slate-200 px-6 py-4 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
                         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
                             <h1 className="text-xl font-extrabold text-slate-800 flex items-center gap-2">
-                                📊 CL 시스템 재고 관리 <span className="text-slate-400 font-semibold text-sm">(v16)</span>
+                                📊 CL 시스템 재고 관리 <span className="text-slate-400 font-semibold text-sm">(v22)</span>
                             </h1>
                             
                             <div className="flex items-center gap-1.5 bg-slate-100 px-2.5 py-1 rounded-full w-fit">
@@ -560,80 +617,67 @@
                                 
                                 <div className="flex flex-col gap-3">
                                     <div className="flex items-center gap-2">
-                                        <h2 className="text-lg font-bold text-slate-800">
-                                            통합 분석 리포트
-                                        </h2>
-                                        {viewMode === 'period' && displayDateRange && (
+                                        <h2 className="text-lg font-bold text-slate-800">통합 분석 리포트</h2>
+                                        {displayDateRange && (
                                             <span className="bg-indigo-50 border border-indigo-100 text-indigo-700 text-xs font-bold px-2 py-1 rounded-md">
                                                 🗓️ 집계구간: {displayDateRange}
                                             </span>
                                         )}
                                     </div>
-                                    <p className="text-sm text-slate-500">
-                                        마지막 업데이트: {formatDate(currentData.createdAt)}
-                                    </p>
+                                    <p className="text-sm text-slate-500">마지막 업데이트: {formatDate(currentData.createdAt)}</p>
 
-                                    {/* v16 신규: 탭 버튼퍼블리싱 및 범위형 달력 기능 */}
-                                    <div className="flex flex-col gap-3 mt-1">
-                                        <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl w-fit">
-                                            <button onClick={() => setViewMode('period')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'period' ? 'bg-white shadow-sm text-indigo-700' : 'text-slate-500 hover:text-slate-800'}`}>기간별 분석</button>
-                                            <button onClick={() => setViewMode('custom')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${viewMode === 'custom' ? 'bg-white shadow-sm text-indigo-700' : 'text-slate-500 hover:text-slate-800'}`}>일자 직접 지정</button>
-                                        </div>
+                                    {/* 뷰 모드 스위치 */}
+                                    <div className="flex bg-slate-100 p-1 rounded-lg w-fit mt-1">
+                                        <button 
+                                            onClick={() => setViewMode('period')}
+                                            className={`px-4 py-1.5 text-sm font-bold rounded-md transition-colors ${viewMode === 'period' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                        >기간별 분석</button>
+                                        <button 
+                                            onClick={() => setViewMode('custom')}
+                                            className={`px-4 py-1.5 text-sm font-bold rounded-md transition-colors ${viewMode === 'custom' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                        >일자 직접 지정</button>
+                                    </div>
 
-                                        <div className="flex flex-wrap items-center gap-3">
-                                            {viewMode === 'period' ? (
-                                                <div className="flex items-center gap-3 bg-slate-50 p-1.5 rounded-xl border border-slate-200 w-fit">
-                                                    <span className="text-sm font-bold text-slate-700 pl-2">분석 기준일:</span>
-                                                    <div className="flex gap-1">
-                                                        <button onClick={() => setSelectedPeriod(30)} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${selectedPeriod === 30 ? 'bg-white shadow-sm text-indigo-700 border border-slate-200' : 'text-slate-500 hover:bg-slate-200'}`}>30일</button>
-                                                        <button onClick={() => setSelectedPeriod(15)} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${selectedPeriod === 15 ? 'bg-white shadow-sm text-indigo-700 border border-slate-200' : 'text-slate-500 hover:bg-slate-200'}`}>15일</button>
-                                                        <button onClick={() => setSelectedPeriod(7)} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${selectedPeriod === 7 ? 'bg-white shadow-sm text-indigo-700 border border-slate-200' : 'text-slate-500 hover:bg-slate-200'}`}>7일</button>
-                                                    </div>
+                                    {/* 컨트롤 패널 하단 (기간 버튼 or 달력 입력) + 검색창 */}
+                                    <div className="flex flex-wrap items-center gap-3">
+                                        {viewMode === 'period' ? (
+                                            <div className="flex items-center gap-3 bg-slate-50 p-1.5 rounded-xl border border-slate-200">
+                                                <span className="text-sm font-bold text-slate-700 pl-2">분석 기준일:</span>
+                                                <div className="flex gap-1">
+                                                    <button onClick={() => setSelectedPeriod(30)} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${selectedPeriod === 30 ? 'bg-white shadow-sm text-indigo-700 border border-slate-200' : 'text-slate-500 hover:bg-slate-200'}`}>30일</button>
+                                                    <button onClick={() => setSelectedPeriod(15)} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${selectedPeriod === 15 ? 'bg-white shadow-sm text-indigo-700 border border-slate-200' : 'text-slate-500 hover:bg-slate-200'}`}>15일</button>
+                                                    <button onClick={() => setSelectedPeriod(7)} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${selectedPeriod === 7 ? 'bg-white shadow-sm text-indigo-700 border border-slate-200' : 'text-slate-500 hover:bg-slate-200'}`}>7일</button>
                                                 </div>
-                                            ) : (
-                                                <div className="flex items-center gap-2 bg-indigo-50/50 p-1.5 rounded-xl border border-indigo-200 w-fit">
-                                                    <span className="text-sm font-bold text-indigo-800 pl-2">출고일 구간:</span>
-                                                    <div className="flex items-center gap-1.5 pr-1">
-                                                        <input 
-                                                            type="date" 
-                                                            value={customStartDate} 
-                                                            onChange={(e) => setCustomStartDate(e.target.value)} 
-                                                            className="px-3 py-1.5 bg-white border border-indigo-200 rounded-lg text-sm font-bold text-indigo-700 outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
-                                                        />
-                                                        <span className="text-indigo-300 font-extrabold px-0.5">~</span>
-                                                        <input 
-                                                            type="date" 
-                                                            value={customEndDate} 
-                                                            onChange={(e) => setCustomEndDate(e.target.value)} 
-                                                            className="px-3 py-1.5 bg-white border border-indigo-200 rounded-lg text-sm font-bold text-indigo-700 outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
-                                                        />
-                                                    </div>
-                                                </div>
-                                            )}
-                                            
-                                            <div className="relative w-full sm:w-64">
-                                                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                                                    <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-                                                </div>
-                                                <input 
-                                                    type="text" 
-                                                    placeholder="상품명 검색..." 
-                                                    value={searchTerm}
-                                                    onChange={(e) => setSearchTerm(e.target.value)}
-                                                    className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-colors text-slate-700"
-                                                />
                                             </div>
+                                        ) : (
+                                            <div className="flex items-center gap-2 bg-indigo-50 p-1.5 rounded-xl border border-indigo-200">
+                                                <span className="text-sm font-bold text-indigo-800 pl-2">출고일 구간:</span>
+                                                <input type="date" value={customStartDate} onChange={(e) => setCustomStartDate(e.target.value)} className="px-2 py-1.5 text-sm font-bold text-slate-700 rounded-lg border border-slate-300 focus:outline-none focus:border-indigo-500"/>
+                                                <span className="text-indigo-400 font-bold">~</span>
+                                                <input type="date" value={customEndDate} onChange={(e) => setCustomEndDate(e.target.value)} className="px-2 py-1.5 text-sm font-bold text-slate-700 rounded-lg border border-slate-300 focus:outline-none focus:border-indigo-500"/>
+                                            </div>
+                                        )}
+
+                                        {/* 상품명 검색 */}
+                                        <div className="relative">
+                                            <input 
+                                                type="text" 
+                                                placeholder="🔍 상품명 검색..." 
+                                                value={searchKeyword}
+                                                onChange={(e) => setSearchKeyword(e.target.value)}
+                                                className="px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium text-slate-700 focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 w-48 transition-all"
+                                            />
                                         </div>
                                     </div>
                                 </div>
 
-                                <div className="flex flex-col items-end gap-3 w-full xl:w-auto mt-2 xl:mt-0">
+                                <div className="flex flex-col items-end gap-3 w-full xl:w-auto mt-4 xl:mt-0">
                                     
                                     {histories.length > 0 && (
                                         <div className="flex items-center gap-1.5 bg-slate-50 p-1 rounded-xl border border-slate-200 shadow-sm">
                                             <span className="text-sm font-bold text-slate-700 pl-2 pr-1 hidden sm:inline">히스토리:</span>
                                             <select 
-                                                className="bg-white border border-slate-300 text-slate-700 text-sm font-medium rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-full py-1.5 px-2 cursor-pointer outline-none"
+                                                className="bg-white border border-slate-300 text-slate-700 text-sm font-medium rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block py-1.5 px-2 cursor-pointer outline-none"
                                                 value={selectedHistoryId || ""}
                                                 onChange={(e) => setSelectedHistoryId(e.target.value)}
                                             >
@@ -654,15 +698,12 @@
                                     )}
 
                                     <div className="flex flex-wrap items-center justify-end gap-3 w-full">
-                                        {/* v15: 기간별 분석 모드일 때만 30일 이내 품절 예상 버튼 노출 */}
-                                        {viewMode === 'period' && (
-                                            <button 
-                                                onClick={() => setShowWarningOnly(!showWarningOnly)}
-                                                className={`px-4 py-2.5 rounded-lg text-sm font-bold transition-colors border shadow-sm ${showWarningOnly ? 'bg-red-50 text-red-600 border-red-200' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
-                                            >
-                                                {showWarningOnly ? '전체 목록 보기' : '🚨 30일 이내 품절 예상'}
-                                            </button>
-                                        )}
+                                        <button 
+                                            onClick={() => setShowWarningOnly(!showWarningOnly)}
+                                            className={`px-4 py-2.5 rounded-lg text-sm font-bold transition-colors border shadow-sm ${showWarningOnly ? 'bg-red-50 text-red-600 border-red-200' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
+                                        >
+                                            {showWarningOnly ? '전체 목록 보기' : '🚨 30일 이내 품절 예상'}
+                                        </button>
                                         
                                         <button 
                                             onClick={exportToExcel}
@@ -682,7 +723,7 @@
 
                         <div className="bg-white rounded-2xl shadow-sm border border-slate-200">
                             <table className="w-full min-w-[750px] text-sm text-slate-600 table-fixed">
-                                <thead className="bg-slate-50 sticky top-0 z-40 shadow-sm ring-1 ring-slate-200">
+                                <thead className="bg-slate-50 sticky top-0 z-40 shadow-sm ring-1 ring-slate-200 rounded-t-2xl">
                                     <tr>
                                         <th scope="col" className="w-[45%] px-4 py-4 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-left rounded-tl-2xl">
                                             <div className="flex justify-between items-center w-full">
@@ -690,28 +731,18 @@
                                                 <span className="text-right w-16 shrink-0">총재고</span>
                                             </div>
                                         </th>
-                                        {/* v16: 뷰 모드에 따라 헤더 변경 */}
-                                        {viewMode === 'period' ? (
-                                            <>
-                                                <th scope="col" className="w-[18%] px-4 py-3 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-right leading-tight">
-                                                    출고수량({selectedPeriod}일)<br/>
-                                                    {displayDateRange && <span className="text-[12px] font-bold text-slate-400 tracking-tighter">({displayDateRange})</span>}
-                                                </th>
-                                                <th scope="col" className="w-[15%] px-4 py-4 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-right">일평균</th>
-                                                <th scope="col" className="w-[22%] px-4 py-4 text-[15px] font-extrabold text-indigo-900 bg-indigo-100/50 border-b-2 border-indigo-200 text-right rounded-tr-2xl">예상 소진일</th>
-                                            </>
-                                        ) : (
-                                            <th scope="col" className="w-[55%] px-4 py-4 text-[15px] font-extrabold text-indigo-900 bg-indigo-50 border-b-2 border-indigo-200 text-right rounded-tr-2xl">
-                                                {customStartDate === customEndDate ? customStartDate : `${customStartDate} ~ ${customEndDate}`} 출고수량
-                                            </th>
-                                        )}
+                                        <th scope="col" className="w-[18%] px-4 py-3 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-right leading-tight">
+                                            {viewMode === 'period' ? `출고수량(${selectedPeriod}일)` : '지정일 출고수량'}
+                                        </th>
+                                        <th scope="col" className="w-[15%] px-4 py-4 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-right">일평균</th>
+                                        <th scope="col" className="w-[22%] px-4 py-4 text-[15px] font-extrabold text-indigo-900 bg-indigo-100/50 border-b-2 border-indigo-200 text-right rounded-tr-2xl">예상 소진일</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {currentData ? (
                                         processedItems.length > 0 ? (
                                             processedItems.map((item, idx) => {
-                                                const isWarning = viewMode === 'period' && item._availableDays !== null && item._availableDays < 30;
+                                                const isWarning = item._availableDays !== null && item._availableDays < 30;
                                                 
                                                 const isGroupChanged = idx > 0 && processedItems[idx - 1]._mainGroup !== item._mainGroup;
                                                 const borderClass = isGroupChanged ? 'border-t-2 border-t-slate-400' : 'border-t border-slate-100';
@@ -728,41 +759,32 @@
                                                                 </span>
                                                             </div>
                                                         </td>
-                                                        {/* v16: 뷰 모드에 따라 데이터 렌더링 분기 */}
-                                                        {viewMode === 'period' ? (
-                                                            <>
-                                                                <td className={`px-4 py-4 text-right font-black text-[15px] ${isWarning ? 'text-red-800' : 'text-slate-700'}`}>
-                                                                    {item._outboundToDisplay.toLocaleString()}
-                                                                </td>
-                                                                <td className={`px-4 py-4 text-right font-black text-[15px] ${isWarning ? 'text-red-700' : 'text-slate-600'}`}>
-                                                                    {item._outboundToDisplay > 0 ? item._dailyToDisplay.toFixed(1) : '-'}
-                                                                </td>
-                                                                <td className={`px-4 py-4 text-right font-black text-[15px] ${isWarning ? 'text-red-600' : 'text-indigo-600'}`}>
-                                                                    {item._availableDays === null ? (
-                                                                        <span className="text-slate-400 font-bold text-[14px]">출고 없음</span>
-                                                                    ) : (
-                                                                        <span>{item._availableDays.toLocaleString()} 일</span>
-                                                                    )}
-                                                                </td>
-                                                            </>
-                                                        ) : (
-                                                            <td className="px-4 py-4 text-right font-black text-[16px] text-indigo-700 bg-indigo-50/10">
-                                                                {item._customQty > 0 ? item._customQty.toLocaleString() : '-'}
-                                                            </td>
-                                                        )}
+                                                        <td className={`px-4 py-4 text-right font-black text-[15px] ${isWarning ? 'text-red-800' : 'text-slate-700'}`}>
+                                                            {item._outboundToDisplay.toLocaleString()}
+                                                        </td>
+                                                        <td className={`px-4 py-4 text-right font-black text-[15px] ${isWarning ? 'text-red-700' : 'text-slate-600'}`}>
+                                                            {item._outboundToDisplay > 0 ? item._dailyToDisplay.toFixed(1) : '-'}
+                                                        </td>
+                                                        <td className={`px-4 py-4 text-right font-black text-[15px] ${isWarning ? 'text-red-600' : 'text-indigo-600'}`}>
+                                                            {item._availableDays === null ? (
+                                                                <span className="text-slate-400 font-bold text-[14px]">출고 없음</span>
+                                                            ) : (
+                                                                <span>{item._availableDays.toLocaleString()} 일</span>
+                                                            )}
+                                                        </td>
                                                     </tr>
                                                 );
                                             })
                                         ) : (
                                             <tr>
-                                                <td colSpan={viewMode === 'period' ? "4" : "2"} className="px-6 py-16 text-center text-slate-500 font-medium border-t border-slate-100">
-                                                    조건에 일치하는 품목이 없습니다.
+                                                <td colSpan="4" className="px-6 py-16 text-center text-slate-500 font-medium border-t border-slate-100">
+                                                    검색 조건에 일치하는 품목이 없습니다.
                                                 </td>
                                             </tr>
                                         )
                                     ) : (
                                         <tr>
-                                            <td colSpan={viewMode === 'period' ? "4" : "2"} className="px-6 py-16 text-center text-slate-500 font-medium border-t border-slate-100">
+                                            <td colSpan="4" className="px-6 py-16 text-center text-slate-500 font-medium border-t border-slate-100">
                                                 등록된 데이터가 없습니다. 아래에서 엑셀 파일을 업로드해주세요.
                                             </td>
                                         </tr>
