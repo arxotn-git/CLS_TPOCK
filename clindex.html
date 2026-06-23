@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
-    <title>CL 시스템 재고 관리 (v30)</title>
+    <title>CL 시스템 재고 관리 (v40)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&family=Noto+Sans+KR:wght@400;500;700;900&display=swap" rel="stylesheet">
@@ -24,7 +24,6 @@
         }
         .animate-slide-down { animation: slideDown 0.3s ease-out forwards; }
 
-        /* v24: 테이블 내부 커스텀 스크롤바 디자인 */
         .custom-scrollbar::-webkit-scrollbar {
             width: 8px;
             height: 8px;
@@ -216,90 +215,156 @@
                 return null;
             };
 
-            const handleFileUpload = (e) => {
-                const file = e.target.files[0];
-                if (!file) return;
+            const handleFileUpload = async (e) => {
+                // v40: 여러 파일을 동시에 업로드할 수 있도록 배열로 변환
+                const files = Array.from(e.target.files);
+                if (files.length === 0) return;
 
                 setIsUploading(true);
 
-                const reader = new FileReader();
-                reader.onload = async (evt) => {
-                    try {
-                        const bstr = evt.target.result;
-                        const wb = XLSX.read(bstr, { type: 'binary', cellDates: true });
+                try {
+                    let rawStock = [];
+                    let rawOutbound = [];
+                    let isStockFile = false;
+                    let isOutboundFile = false;
+                    let hasParsedStockHeader = false;
+                    let hasParsedOutboundHeader = false;
+
+                    // 여러 파일을 병렬로 읽어들임
+                    const fileReads = files.map(file => {
+                        return new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = (evt) => resolve({ file, data: evt.target.result });
+                            reader.onerror = reject;
+                            reader.readAsBinaryString(file);
+                        });
+                    });
+
+                    const results = await Promise.all(fileReads);
+
+                    for (const result of results) {
+                        const { file, data: fileString } = result;
+                        let wb;
                         
-                        if (wb.SheetNames.length < 2) {
-                            alert("엑셀 파일에 시트가 2개 이상 필요합니다. (1번 시트: 현재고, 2번 시트: 출고수량)");
-                            setIsUploading(false);
-                            return;
-                        }
-                        
-                        const ws1 = wb.Sheets[wb.SheetNames[0]]; 
-                        const ws2 = wb.Sheets[wb.SheetNames[1]]; 
-                        
-                        const raw1 = XLSX.utils.sheet_to_json(ws1, { header: 1, raw: true });
-                        const raw2Raw = XLSX.utils.sheet_to_json(ws2, { header: 1, raw: true });
-
-                        const header1 = raw1[0] || [];
-                        const header2 = raw2Raw[0] || [];
-
-                        const findIdx = (header, keywords, fallback) => {
-                            const idx = header.findIndex(col => keywords.some(k => String(col).trim() === k));
-                            return idx >= 0 ? idx : fallback;
-                        };
-
-                        const h1NameIdx = findIdx(header1, ['상품명', '자사 상품명'], 4);
-                        const h1StockIdx = findIdx(header1, ['가용재고', '현재고', '총재고'], 5); 
-                        const h1SafeStockIdx = findIdx(header1, ['안전재고'], 9); 
-
-                        const h2DateIdx = findIdx(header2, ['출고일시', '주문일'], 6);
-                        const h2NameIdx = findIdx(header2, ['자사 상품명', '상품명'], 7);
-                        const h2QtyIdx = findIdx(header2, ['출고량', '수량'], 8);
-
-                        const seenRows = new Set();
-                        const raw2 = [];
-
-                        raw2Raw.forEach((row, idx) => {
-                            if (idx === 0) {
-                                raw2.push(row); 
-                                return;
+                        if (fileString.includes('<table') || fileString.includes('<TABLE') || fileString.includes('<?xml')) {
+                            console.warn(`[${file.name}] HTML/XML 기반 가짜 엑셀 감지. 자체 스크래핑 가동...`);
+                            const parser = new DOMParser();
+                            const doc = parser.parseFromString(fileString, 'text/html');
+                            const table = doc.querySelector('table');
+                            
+                            if (!table) {
+                                throw new Error(`[${file.name}] 문서 내에서 표(Table)를 찾을 수 없습니다.`);
                             }
-                            if (!row || row.length === 0) return; 
+                            wb = XLSX.utils.table_to_book(table, { raw: true });
+                        } else {
+                            wb = XLSX.read(fileString, { type: 'binary' });
+                        }
 
-                            const uniqueKey = row.map(cell => {
-                                if (cell instanceof Date) return cell.getTime();
-                                return String(cell || '').trim();
-                            }).join("|");
+                        const ws = wb.Sheets[wb.SheetNames[0]];
+                        const sheetData = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+                        const headerRow = sheetData[0] || [];
+                        
+                        const hasStockKeywords = headerRow.some(k => typeof k === 'string' && (k.includes('현재고') || k.includes('가용재고') || k.includes('안전재고')));
+                        const hasOutboundKeywords = headerRow.some(k => typeof k === 'string' && (k.includes('출고일시') || k.includes('출고량') || k.includes('주문일')));
 
-                            if (!seenRows.has(uniqueKey)) {
-                                seenRows.add(uniqueKey);
-                                raw2.push(row);
+                        if (wb.SheetNames.length >= 2 && !file.name.toLowerCase().includes('.csv')) {
+                            isStockFile = true;
+                            isOutboundFile = true;
+                            const sData = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
+                            const oData = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[1]], { header: 1, raw: true, defval: '' });
+                            
+                            rawStock = hasParsedStockHeader ? rawStock.concat(sData.slice(1)) : sData;
+                            rawOutbound = hasParsedOutboundHeader ? rawOutbound.concat(oData.slice(1)) : oData;
+                            hasParsedStockHeader = true;
+                            hasParsedOutboundHeader = true;
+                        } else {
+                            if (hasStockKeywords) {
+                                isStockFile = true;
+                                rawStock = hasParsedStockHeader ? rawStock.concat(sheetData.slice(1)) : sheetData;
+                                hasParsedStockHeader = true;
+                            } else if (hasOutboundKeywords) {
+                                isOutboundFile = true;
+                                rawOutbound = hasParsedOutboundHeader ? rawOutbound.concat(sheetData.slice(1)) : sheetData;
+                                hasParsedOutboundHeader = true;
+                            } else {
+                                throw new Error(`[${file.name}] 엑셀 내부에 필수 헤더가 존재하지 않습니다.`);
+                            }
+                        }
+                    }
+
+                    let latestHistory = histories.length > 0 ? histories[0] : null;
+                    
+                    const findIdxPriority = (header, keywords, fallback) => {
+                        for (const k of keywords) {
+                            const idx = header.findIndex(col => String(col).trim() === k);
+                            if (idx !== -1) return idx;
+                        }
+                        return fallback;
+                    };
+
+                    const outboundMap = {};
+                    let globalMaxDateObj = new Date(0);
+                    let baseTime = latestHistory ? latestHistory.baseDate : new Date().getTime();
+                    
+                    const newUploadedDates = new Set();
+                    let header2 = [];
+                    let h2DateIdx = -1;
+                    let h2NameIdx = -1;
+                    let h2QtyIdx = -1;
+
+                    if (isOutboundFile) {
+                        header2 = rawOutbound[0] || [];
+                        h2DateIdx = findIdxPriority(header2, ['출고일시', '주문일'], 6);
+                        h2NameIdx = findIdxPriority(header2, ['자사 상품명', '상품명'], 7);
+                        h2QtyIdx = findIdxPriority(header2, ['출고량', '수량'], 8);
+
+                        rawOutbound.forEach((row, idx) => {
+                            if (idx === 0 || !row || row.length === 0) return;
+                            const d = parseExcelDate(row[h2DateIdx]);
+                            if (d && !isNaN(d.getTime())) {
+                                const dKey = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                                newUploadedDates.add(dKey);
+                                
+                                if (d.getTime() > globalMaxDateObj.getTime()) {
+                                    globalMaxDateObj = d;
+                                }
                             }
                         });
 
-                        let globalMaxDateObj = new Date(0);
-                        raw2.forEach((row, idx) => {
-                            if (idx === 0 || !row) return; 
-                            const d = parseExcelDate(row[h2DateIdx]); 
-                            if (d && !isNaN(d.getTime()) && d.getTime() > globalMaxDateObj.getTime()) {
-                                globalMaxDateObj = d;
-                            }
-                        });
-
-                        if (globalMaxDateObj.getTime() === 0) {
-                            globalMaxDateObj = new Date(); 
+                        if (globalMaxDateObj.getTime() > 0) {
+                            const baseDateObj = new Date(globalMaxDateObj.getFullYear(), globalMaxDateObj.getMonth(), globalMaxDateObj.getDate(), 23, 59, 59, 999);
+                            baseTime = baseDateObj.getTime();
                         }
+                    }
 
-                        const baseDate = new Date(globalMaxDateObj.getFullYear(), globalMaxDateObj.getMonth(), globalMaxDateObj.getDate(), 23, 59, 59, 999);
-                        const baseTime = baseDate.getTime();
-                        
-                        const time30 = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() - 29, 0, 0, 0, 0).getTime();
-                        const time15 = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() - 14, 0, 0, 0, 0).getTime();
-                        const time7 = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() - 6, 0, 0, 0, 0).getTime();
+                    if (latestHistory) {
+                        latestHistory.items.forEach(item => {
+                            const preservedDaily = { ...(item.daily || {}) };
+                            
+                            if (isOutboundFile) {
+                                newUploadedDates.forEach(dateStr => {
+                                    delete preservedDaily[dateStr];
+                                });
+                            }
+                            
+                            outboundMap[item.itemName] = {
+                                out_30: 0,
+                                out_15: 0,
+                                out_7: 0,
+                                daily: preservedDaily
+                            };
+                        });
+                    }
 
-                        const outboundMap = {};
-                        raw2.forEach((row, idx) => {
-                            if (idx === 0 || !row) return;
+                    if (isOutboundFile) {
+                        const baseDateForRange = new Date(baseTime);
+                        const time30 = new Date(baseDateForRange.getFullYear(), baseDateForRange.getMonth(), baseDateForRange.getDate() - 29, 0, 0, 0, 0).getTime();
+                        const time15 = new Date(baseDateForRange.getFullYear(), baseDateForRange.getMonth(), baseDateForRange.getDate() - 14, 0, 0, 0, 0).getTime();
+                        const time7 = new Date(baseDateForRange.getFullYear(), baseDateForRange.getMonth(), baseDateForRange.getDate() - 6, 0, 0, 0, 0).getTime();
+
+                        rawOutbound.forEach((row, idx) => {
+                            if (idx === 0 || !row || row.length === 0) return;
+                            
                             const itemName = String(row[h2NameIdx] || '').trim();
                             const amtStr = String(row[h2QtyIdx] || "0").replace(/,/g, '');
                             const amt = parseFloat(amtStr) || 0;
@@ -308,21 +373,46 @@
                             const d = parseExcelDate(row[h2DateIdx]);
                             if (!d || isNaN(d.getTime())) return;
                             
-                            const dTime = d.getTime();
                             if (!outboundMap[itemName]) {
                                 outboundMap[itemName] = { out_30: 0, out_15: 0, out_7: 0, daily: {} };
                             }
                             
-                            if (dTime >= time30 && dTime <= baseTime) outboundMap[itemName].out_30 += amt;
-                            if (dTime >= time15 && dTime <= baseTime) outboundMap[itemName].out_15 += amt;
-                            if (dTime >= time7 && dTime <= baseTime) outboundMap[itemName].out_7 += amt;
-
                             const dKey = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
                             outboundMap[itemName].daily[dKey] = (outboundMap[itemName].daily[dKey] || 0) + amt;
                         });
 
-                        const parsedItems = [];
-                        raw1.forEach((row, idx) => {
+                        Object.keys(outboundMap).forEach(itemName => {
+                            let sum30 = 0, sum15 = 0, sum7 = 0;
+                            Object.entries(outboundMap[itemName].daily).forEach(([dStr, amt]) => {
+                                if (!dStr.includes('-')) return;
+                                const [y, m, d] = dStr.split('-');
+                                const dt = new Date(y, m - 1, d, 12, 0, 0).getTime();
+                                
+                                if (dt >= time30 && dt <= baseTime) sum30 += amt;
+                                if (dt >= time15 && dt <= baseTime) sum15 += amt;
+                                if (dt >= time7 && dt <= baseTime) sum7 += amt;
+                            });
+                            outboundMap[itemName].out_30 = sum30;
+                            outboundMap[itemName].out_15 = sum15;
+                            outboundMap[itemName].out_7 = sum7;
+                        });
+                    }
+
+                    const parsedItemsMap = new Map();
+
+                    if (latestHistory) {
+                        latestHistory.items.forEach(item => {
+                            parsedItemsMap.set(item.itemName, { ...item });
+                        });
+                    }
+
+                    if (isStockFile) {
+                        const header1 = rawStock[0] || [];
+                        const h1NameIdx = findIdxPriority(header1, ['자사 상품명', '상품명'], 4);
+                        const h1StockIdx = findIdxPriority(header1, ['가용재고', '현재고', '총재고'], 5); 
+                        const h1SafeStockIdx = findIdxPriority(header1, ['안전재고'], 9); 
+
+                        rawStock.forEach((row, idx) => {
                             if (idx === 0 || !row) return; 
                             const itemName = String(row[h1NameIdx] || '').trim(); 
                             const stockStr = String(row[h1StockIdx] || "0").replace(/,/g, '');
@@ -333,47 +423,64 @@
 
                             if (!itemName || itemName === '상품명' || itemName === '자사 상품명') return;
                             
-                            const outData = outboundMap[itemName] || { out_30: 0, out_15: 0, out_7: 0, daily: {} };
-                            
-                            parsedItems.push({
+                            const existing = parsedItemsMap.get(itemName) || {};
+                            parsedItemsMap.set(itemName, {
+                                ...existing,
                                 itemName,
                                 stock,
-                                safeStock,
-                                out_30: outData.out_30,
-                                out_15: outData.out_15,
-                                out_7: outData.out_7,
-                                daily: outData.daily
+                                safeStock
                             });
                         });
-
-                        const nextVersion = `V${histories.length + 1}`;
-                        const now = new Date().toISOString();
-                        
-                        const newDocData = { 
-                            version: nextVersion, 
-                            createdAt: now, 
-                            baseDate: baseTime,
-                            items: parsedItems 
-                        };
-
-                        if (firebaseRefs) {
-                            const { db, appId, collection, addDoc } = firebaseRefs;
-                            const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'inventory_history');
-                            const newDoc = await addDoc(collRef, newDocData);
-                            setSelectedHistoryId(newDoc.id);
-                            
-                            setToastMessage(`성공! (안전재고 연동 완료 / 공통 기준일: ${baseDate.toLocaleDateString()})`);
-                        }
-
-                    } catch (error) {
-                        console.error("Excel parse error:", error);
-                        alert("엑셀 데이터를 분석하는 중 오류가 발생했습니다. 데이터 구조를 확인해주세요.");
-                    } finally {
-                        setIsUploading(false);
-                        e.target.value = null;
                     }
-                };
-                reader.readAsBinaryString(file);
+
+                    const finalItems = Array.from(parsedItemsMap.values()).map(item => {
+                        const outData = outboundMap[item.itemName] || { out_30: 0, out_15: 0, out_7: 0, daily: {} };
+                        return {
+                            ...item,
+                            out_30: outData.out_30,
+                            out_15: outData.out_15,
+                            out_7: outData.out_7,
+                            daily: outData.daily
+                        };
+                    });
+
+                    const nextVersion = `V${histories.length + 1}`;
+                    const now = new Date().toISOString();
+                    
+                    const newDocData = { 
+                        version: nextVersion, 
+                        createdAt: now, 
+                        baseDate: baseTime,
+                        items: finalItems 
+                    };
+
+                    if (firebaseRefs) {
+                        const { db, appId, collection, addDoc } = firebaseRefs;
+                        const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'inventory_history');
+                        const newDoc = await addDoc(collRef, newDocData);
+                        setSelectedHistoryId(newDoc.id);
+                        
+                        let msg = "업데이트 완료 ";
+                        if (isStockFile && isOutboundFile) msg += "(재고/출고 통합 반영)";
+                        else if (isStockFile) msg += "(현재고 단독)";
+                        else if (isOutboundFile) msg += "(출고수량 단독)";
+                        
+                        const displayDate = new Date(baseTime).toLocaleDateString();
+                        setToastMessage(`${msg} - 겹치는 날짜 완벽 덮어쓰기 완료 / 기준일: ${displayDate}`);
+                    }
+
+                } catch (error) {
+                    console.error("Excel parse error:", error);
+                    const errMsg = error.message ? error.message.toLowerCase() : "";
+                    if (errMsg.includes('password') || errMsg.includes('암호')) {
+                        alert("🚨 파일 업로드 실패 (비밀번호 잠금)\n\n업로드하신 엑셀 파일에 [비밀번호]가 설정되어 있어 보안상 브라우저가 데이터를 읽을 수 없습니다.\n\n[해결 방법]\n1. 엑셀(Excel) 프로그램에서 해당 파일을 엽니다.\n2. '다른 이름으로 저장'을 클릭합니다.\n3. 도구(일반 옵션)에서 설정된 비밀번호를 지우고 저장합니다.\n4. 비밀번호가 해제된 파일을 다시 업로드해 주세요.");
+                    } else {
+                        alert(`❌ 엑셀 분석 실패\n\n알 수 없는 형식의 파일입니다. 엑셀에서 파일을 열고 [다른 이름으로 저장] > [Excel 통합 문서(*.xlsx)]로 다시 저장한 뒤 업로드해 주세요.\n\n(상세에러: ${error.message})`);
+                    }
+                } finally {
+                    setIsUploading(false);
+                    e.target.value = null; // 입력 초기화
+                }
             };
 
             const formatDate = (isoString) => {
@@ -393,12 +500,10 @@
             useEffect(() => {
                 if (currentData && currentData.baseDate) {
                     const end = new Date(currentData.baseDate);
-                    const start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - 29);
-                    
                     const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
                     
                     setCustomEndDate(fmt(end));
-                    setCustomStartDate(fmt(start));
+                    setCustomStartDate(fmt(end));
                 }
             }, [currentData]);
 
@@ -428,12 +533,17 @@
                 
                 let sTime = 0, eTime = 0;
                 if (viewMode === 'custom' && customStartDate && customEndDate) {
-                    const s = new Date(customStartDate).getTime();
-                    const eObj = new Date(customEndDate);
-                    eObj.setHours(23, 59, 59, 999);
-                    const e = eObj.getTime();
-                    sTime = Math.min(s, new Date(customEndDate).getTime());
-                    eTime = Math.max(new Date(customStartDate).setHours(23,59,59,999), e);
+                    const parseSafe = (dStr, isEnd) => {
+                        const [y, m, d] = dStr.split('-');
+                        return isEnd ? new Date(y, m - 1, d, 23, 59, 59, 999).getTime() : new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
+                    };
+                    sTime = parseSafe(customStartDate, false);
+                    eTime = parseSafe(customEndDate, true);
+                    if (sTime > eTime) {
+                        const temp = sTime;
+                        sTime = eTime;
+                        eTime = temp;
+                    }
                 }
 
                 return currentData.items.map(item => {
@@ -453,7 +563,9 @@
                         if (sTime > 0 && eTime > 0 && item.daily) {
                             let sum = 0;
                             Object.entries(item.daily).forEach(([dStr, amt]) => {
-                                const dt = new Date(dStr).getTime();
+                                if (!dStr.includes('-')) return;
+                                const [y, m, d] = dStr.split('-');
+                                const dt = new Date(y, m - 1, d, 12, 0, 0).getTime();
                                 if (dt >= sTime && dt <= eTime) sum += amt;
                             });
                             outbound = sum;
@@ -516,7 +628,7 @@
                     const rowData = {
                         "상품명": item._displayName,
                         "총재고": item.stock,
-                        "안전재고": item.safeStock, 
+                        "안전재고": item.safeStock || 0,
                         [dynamicColName]: item._outboundToDisplay
                     };
                     
@@ -538,7 +650,9 @@
                 XLSX.utils.book_append_sheet(workbook, worksheet, "재고소진예상일");
                 
                 let rangeStr = viewMode === 'period' ? `${selectedPeriod}일` : '지정일';
-                const fileName = `재고소진분석_${rangeStr}_${getFileNameDate(currentData.createdAt)}.xlsx`;
+                
+                const currentDownloadTime = new Date().toISOString();
+                const fileName = `재고소진분석_${rangeStr}_${getFileNameDate(currentDownloadTime)}.xlsx`;
                 XLSX.writeFile(workbook, fileName);
             };
 
@@ -601,7 +715,7 @@
                     <header className="glass-effect relative z-30 border-b border-slate-200 px-6 py-4 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
                         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
                             <h1 className="text-xl font-extrabold text-slate-800 flex items-center gap-2">
-                                📊 CL 시스템 재고 관리 <span className="text-slate-400 font-semibold text-sm">(v30)</span>
+                                📊 CL 시스템 재고 관리 <span className="text-slate-400 font-semibold text-sm">(v40)</span>
                             </h1>
                             
                             <div className="flex items-center gap-1.5 bg-slate-100 px-2.5 py-1 rounded-full w-fit">
@@ -695,29 +809,7 @@
 
                                 <div className="flex flex-col items-end gap-3 w-full xl:w-auto mt-4 xl:mt-0">
                                     
-                                    {histories.length > 0 && (
-                                        <div className="flex items-center gap-1.5 bg-slate-50 p-1 rounded-xl border border-slate-200 shadow-sm">
-                                            <span className="text-sm font-bold text-slate-700 pl-2 pr-1 hidden sm:inline">히스토리:</span>
-                                            <select 
-                                                className="bg-white border border-slate-300 text-slate-700 text-sm font-medium rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block py-1.5 px-2 cursor-pointer outline-none"
-                                                value={selectedHistoryId || ""}
-                                                onChange={(e) => setSelectedHistoryId(e.target.value)}
-                                            >
-                                                {histories.map(h => (
-                                                    <option key={h.id} value={h.id}>
-                                                        {formatDate(h.createdAt)}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                            <button 
-                                                onClick={handleDeleteHistory}
-                                                title="선택된 히스토리 삭제"
-                                                className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors flex-shrink-0"
-                                            >
-                                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                                            </button>
-                                        </div>
-                                    )}
+                                    {/* v40: 히스토리 선택 및 삭제 UI 완전 비활성화 (보이지 않게 제거) */}
 
                                     <div className="flex flex-wrap items-center justify-end gap-3 w-full">
                                         <button 
@@ -744,29 +836,27 @@
                         )}
 
                         <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden relative">
-                            {/* v30: 이상적인 크기(캡처 이미지)에 맞춰 800px 절대값으로 롤백 및 고정 */}
                             <div style={{ maxHeight: '800px' }} className="overflow-y-auto custom-scrollbar">
                                 <table className="w-full min-w-[850px] text-sm text-slate-600 table-fixed">
                                     <thead className="bg-slate-50 sticky top-0 z-40 shadow-sm ring-1 ring-slate-200">
                                         <tr>
-                                            <th scope="col" className={`${viewMode === 'period' ? 'w-[32%]' : 'w-[40%]'} px-4 py-4 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-left transition-all`}>
+                                            {/* v40: 어떤 뷰 모드든 앞 3개의 열 너비를 100% 동일하게 강제 고정 */}
+                                            <th scope="col" className="w-[34%] px-4 py-4 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-left transition-all">
                                                 상품명
                                             </th>
-                                            {/* 총재고 열 독립 */}
-                                            <th scope="col" className={`${viewMode === 'period' ? 'w-[10%]' : 'w-[15%]'} px-4 py-4 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-right transition-all`}>
+                                            <th scope="col" className="w-[10%] px-4 py-4 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-right transition-all">
                                                 총재고
                                             </th>
-                                            {/* 안전재고 열 추가 */}
-                                            <th scope="col" className={`${viewMode === 'period' ? 'w-[10%]' : 'w-[15%]'} px-4 py-4 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-right transition-all`}>
+                                            <th scope="col" className="w-[10%] px-4 py-4 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-right transition-all">
                                                 안전재고
                                             </th>
-                                            <th scope="col" className={`${viewMode === 'period' ? 'w-[14%]' : 'w-[30%]'} px-4 py-3 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-right leading-tight transition-all`}>
+                                            <th scope="col" className={`${viewMode === 'period' ? 'w-[14%]' : 'w-[46%]'} px-4 py-3 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-right leading-tight transition-all`}>
                                                 {viewMode === 'period' ? `출고수량(${selectedPeriod}일)` : '지정일 출고수량'}
                                             </th>
                                             {viewMode === 'period' && (
                                                 <>
                                                     <th scope="col" className="w-[12%] px-4 py-4 text-[15px] font-extrabold border-b-2 border-slate-300 text-slate-800 text-right transition-all">일평균</th>
-                                                    <th scope="col" className="w-[22%] px-4 py-4 text-[15px] font-extrabold text-indigo-900 bg-indigo-100/50 border-b-2 border-indigo-200 text-right transition-all">예상 소진일</th>
+                                                    <th scope="col" className="w-[20%] px-4 py-4 text-[15px] font-extrabold text-indigo-900 bg-indigo-100/50 border-b-2 border-indigo-200 text-right transition-all">예상 소진일</th>
                                                 </>
                                             )}
                                         </tr>
@@ -781,17 +871,14 @@
                                                     
                                                     return (
                                                         <tr key={idx} className={`transition-colors ${borderClass} ${isWarning ? 'bg-red-50 hover:bg-red-100' : 'bg-white hover:bg-slate-50'}`}>
-                                                            {/* 상품명 (좌측 정렬) */}
                                                             <td className="px-4 py-4">
                                                                 <div className={`font-bold truncate ${isWarning ? 'text-red-900' : 'text-slate-800'}`} title={item._displayName}>
                                                                     {item._displayName}
                                                                 </div>
                                                             </td>
-                                                            {/* 총재고 (우측 정렬) */}
                                                             <td className={`px-4 py-4 text-right font-black text-[15px] ${isWarning ? 'text-red-800' : 'text-slate-900'}`}>
                                                                 {item.stock.toLocaleString()}
                                                             </td>
-                                                            {/* 안전재고 (우측 정렬) */}
                                                             <td className={`px-4 py-4 text-right font-black text-[15px] ${isWarning ? 'text-red-800' : 'text-slate-500'}`}>
                                                                 {item.safeStock.toLocaleString()}
                                                             </td>
@@ -836,21 +923,22 @@
 
                         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 mt-6">
                             <div className="mb-4 flex items-center justify-between">
-                                <h4 className="font-extrabold text-slate-800 text-base flex items-center gap-2">📂 엑셀 파일 통합 업데이트</h4>
+                                <h4 className="font-extrabold text-slate-800 text-base flex items-center gap-2">📂 엑셀 파일 통합/개별 업데이트</h4>
                                 <span className="text-xs text-slate-400">데이터는 자동으로 클라우드에 안전하게 저장됩니다.</span>
                             </div>
                             <div className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors relative ${isUploading ? 'border-slate-300 bg-slate-50' : 'border-indigo-300 hover:border-indigo-500 bg-indigo-50/30 cursor-pointer'}`}>
-                                <input type="file" accept=".xlsx,.xls,.csv" onChange={handleFileUpload} disabled={isUploading} className="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-10 disabled:cursor-not-allowed"/>
+                                {/* v40: multiple 속성을 추가하여 여러 파일을 동시에 첨부할 수 있게 지원 */}
+                                <input type="file" multiple accept=".xlsx,.xls,.csv" onChange={handleFileUpload} disabled={isUploading} className="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-10 disabled:cursor-not-allowed"/>
                                 {isUploading ? (
                                     <div className="flex flex-col items-center justify-center">
                                         <div className="w-8 h-8 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mb-3"></div>
-                                        <h5 className="text-sm font-bold text-slate-600">데이터를 통합 분석 중입니다...</h5>
+                                        <h5 className="text-sm font-bold text-slate-600">데이터를 분석 및 병합 중입니다...</h5>
                                     </div>
                                 ) : (
                                     <>
                                         <div className="bg-white w-12 h-12 rounded-full shadow-sm flex items-center justify-center mx-auto mb-3 text-2xl">📥</div>
-                                        <h5 className="text-sm font-extrabold text-indigo-900">클릭하거나 파일을 드롭하세요</h5>
-                                        <p className="text-xs text-slate-400 mt-1">1번 시트: 현재고 / 2번 시트: 출고수량</p>
+                                        <h5 className="text-sm font-extrabold text-indigo-900">클릭하거나 여러 파일을 드롭하세요</h5>
+                                        <p className="text-xs text-slate-400 mt-1">현재고 엑셀과 출고수량 엑셀을 동시에 드래그하셔도 모두 처리됩니다.</p>
                                     </>
                                 )}
                             </div>
