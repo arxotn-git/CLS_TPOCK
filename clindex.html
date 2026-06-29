@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
-    <title>CL 시스템 재고 관리 (v44)</title>
+    <title>CL 시스템 재고 관리 (v51)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&family=Noto+Sans+KR:wght@400;500;700;900&display=swap" rel="stylesheet">
@@ -113,7 +113,7 @@
 
                         const { initializeApp } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js");
                         const { getAuth, signInAnonymously, onAuthStateChanged } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js");
-                        const { getFirestore, collection, onSnapshot, addDoc, doc, deleteDoc } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
+                        const { getFirestore, collection, onSnapshot, addDoc, doc, deleteDoc, getDocs } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
 
                         const app = initializeApp(firebaseConfig);
                         const auth = getAuth(app);
@@ -121,7 +121,7 @@
                         const appId = 'inventory-tracker-01'; 
 
                         if (isMounted) {
-                            setFirebaseRefs({ db, appId, collection, onSnapshot, addDoc, doc, deleteDoc });
+                            setFirebaseRefs({ db, appId, collection, onSnapshot, addDoc, doc, deleteDoc, getDocs });
                         }
 
                         await signInAnonymously(auth);
@@ -183,20 +183,117 @@
                 }
             };
 
+            const handleResetDB = async () => {
+                if (!firebaseRefs) return;
+                const isConfirmed = window.confirm("🚨 경고: 클라우드에 저장된 모든 과거 재고/출고 히스토리를 완전히 삭제하고 초기화합니다.\n(유령 데이터나 꼬인 수량을 해결할 때 사용합니다.)\n\n정말 초기화 하시겠습니까?");
+                if (!isConfirmed) return;
+
+                try {
+                    const { db, appId, collection, getDocs, deleteDoc } = firebaseRefs;
+                    const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'inventory_history');
+                    const snapshot = await getDocs(collRef);
+                    
+                    const deletePromises = [];
+                    snapshot.forEach(docSnap => {
+                        deletePromises.push(deleteDoc(docSnap.ref));
+                    });
+                    await Promise.all(deletePromises);
+                    
+                    setToastMessage("클라우드 DB가 완벽하게 초기화되었습니다. 엑셀을 새로 업로드해 주세요.");
+                } catch (error) {
+                    console.error("DB Reset error:", error);
+                    alert("초기화 중 오류가 발생했습니다.");
+                }
+            };
+
+            const handleCleanDateRange = async () => {
+                if (!firebaseRefs || !currentData) return;
+                const startStr = window.prompt(
+                    "삭제할 구간 시작일 (YYYY-MM-DD)\n예: 2026-06-20\n\n→ 해당 구간의 daily 데이터를 모두 0으로 초기화하고\n   out_7/15/30 을 재계산합니다.",
+                    "2026-06-20"
+                );
+                if (!startStr) return;
+                const endStr = window.prompt("삭제할 구간 종료일 (YYYY-MM-DD)", startStr);
+                if (!endStr) return;
+
+                const [sy, sm, sd] = startStr.split('-');
+                const [ey, em, ed] = endStr.split('-');
+                const minTime = new Date(sy, sm - 1, sd, 0, 0, 0).getTime();
+                const maxTime = new Date(ey, em - 1, ed, 23, 59, 59).getTime();
+
+                if (isNaN(minTime) || isNaN(maxTime) || minTime > maxTime) {
+                    alert("날짜 형식이 잘못되었습니다.");
+                    return;
+                }
+
+                const base = currentData.baseDate;
+                const baseD = new Date(base);
+                const t30 = new Date(baseD.getFullYear(), baseD.getMonth(), baseD.getDate() - 29, 0, 0, 0).getTime();
+                const t15 = new Date(baseD.getFullYear(), baseD.getMonth(), baseD.getDate() - 14, 0, 0, 0).getTime();
+                const t7  = new Date(baseD.getFullYear(), baseD.getMonth(), baseD.getDate() - 6,  0, 0, 0).getTime();
+
+                const cleanedItems = currentData.items.map(item => {
+                    const daily = { ...(item.daily || {}) };
+                    Object.keys(daily).forEach(dKey => {
+                        const [y, m, d] = dKey.split('-');
+                        const dt = new Date(y, m - 1, d, 12, 0, 0).getTime();
+                        if (dt >= minTime && dt <= maxTime) delete daily[dKey];
+                    });
+
+                    let s30 = 0, s15 = 0, s7 = 0;
+                    Object.entries(daily).forEach(([dKey, amt]) => {
+                        const [y, m, d] = dKey.split('-');
+                        const dt = new Date(y, m - 1, d, 12, 0, 0).getTime();
+                        if (dt >= t30 && dt <= base) s30 += amt;
+                        if (dt >= t15 && dt <= base) s15 += amt;
+                        if (dt >= t7  && dt <= base) s7  += amt;
+                    });
+
+                    return { ...item, daily, out_30: s30, out_15: s15, out_7: s7 };
+                });
+
+                try {
+                    const { db, appId, collection, getDocs, deleteDoc, addDoc } = firebaseRefs;
+                    const collRef = collection(db, 'artifacts', appId, 'public', 'data', 'inventory_history');
+                    const newDoc = await addDoc(collRef, {
+                        ...currentData,
+                        id: undefined,
+                        createdAt: new Date().toISOString(),
+                        version: `V${histories.length + 1}_cleaned`,
+                        items: cleanedItems
+                    });
+                    setSelectedHistoryId(newDoc.id);
+                    setToastMessage(`✅ ${startStr} ~ ${endStr} 구간 ghost 제거 완료 / out_7/15/30 재계산됨`);
+                } catch (err) {
+                    console.error(err);
+                    alert("저장 실패: " + err.message);
+                }
+            };
+
             const parseExcelDate = (val) => {
                 if (!val) return null;
                 if (val instanceof Date) {
-                    // v44: SheetJS Date 객체의 UTC 타임을 로컬 타임으로 재조립 (오후 3시 이후 주문이 다음 날로 넘어가는 타임존 오프셋 버그 수정)
                     return new Date(val.getUTCFullYear(), val.getUTCMonth(), val.getUTCDate(), val.getUTCHours(), val.getUTCMinutes(), val.getUTCSeconds());
                 }
                 if (typeof val === 'number') {
-                    // v44: 엑셀 시리얼 넘버를 파싱할 때도 타임존 오차 완벽 방지
-                    const utcMs = Math.round((val - 25569) * 86400 * 1000);
-                    const d = new Date(utcMs);
-                    return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds());
+                    const days = Math.floor(val);
+                    const fractionalDay = val - days;
+                    const ms = Math.round(fractionalDay * 86400 * 1000);
+                    const d = new Date((days - 25569) * 86400 * 1000);
+                    return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 
+                                    Math.floor(ms / 3600000), 
+                                    Math.floor((ms % 3600000) / 60000), 
+                                    Math.floor((ms % 60000) / 1000));
                 }
-                const str = String(val).trim().replace(/\./g, '-').replace(/\//g, '-').replace(" ", "T");
-                const d = new Date(str);
+                const str = String(val).trim();
+                const match = str.match(/(\d{4})[\-\/\.](\d{1,2})[\-\/\.](\d{1,2})(?:\s+(\d{1,2}):(\d{1,2}):(\d{1,2}))?/);
+                if (match) {
+                    return new Date(parseInt(match[1]), parseInt(match[2])-1, parseInt(match[3]), 
+                                    match[4] ? parseInt(match[4]) : 0, 
+                                    match[5] ? parseInt(match[5]) : 0, 
+                                    match[6] ? parseInt(match[6]) : 0);
+                }
+                const d = new Date(str.replace(" ", "T"));
                 if (!isNaN(d.getTime())) return d;
                 return null;
             };
@@ -239,10 +336,8 @@
                             if (!table) {
                                 throw new Error(`[${file.name}] 문서 내에서 표(Table)를 찾을 수 없습니다.`);
                             }
-                            // v44: cellDates 활성화로 스크래핑 시에도 날짜 객체 정확히 추출
                             wb = XLSX.utils.table_to_book(table, { raw: true, cellDates: true });
                         } else {
-                            // v44: cellDates 활성화로 바이너리 파싱 시에도 날짜 객체 정확히 추출
                             wb = XLSX.read(fileString, { type: 'binary', cellDates: true });
                         }
 
@@ -285,6 +380,10 @@
                             const idx = header.findIndex(col => String(col).trim() === k);
                             if (idx !== -1) return idx;
                         }
+                        for (const k of keywords) {
+                            const idx = header.findIndex(col => String(col).trim().includes(k));
+                            if (idx !== -1) return idx;
+                        }
                         return fallback;
                     };
 
@@ -292,7 +391,9 @@
                     let globalMaxDateObj = new Date(0);
                     let baseTime = latestHistory ? latestHistory.baseDate : new Date().getTime();
                     
-                    const newUploadedDates = new Set();
+                    let minUploadTimeMs = Infinity;
+                    let maxUploadTimeMs = 0;
+
                     let header2 = [];
                     let h2DateIdx = -1;
                     let h2NameIdx = -1;
@@ -302,9 +403,9 @@
                         header2 = rawOutbound[0] || [];
                         h2DateIdx = findIdxPriority(header2, ['출고일시', '주문일'], 6);
                         h2NameIdx = findIdxPriority(header2, ['자사 상품명', '상품명'], 7);
-                        h2QtyIdx = findIdxPriority(header2, ['출고량', '수량'], 8);
+                        h2QtyIdx = findIdxPriority(header2, ['출고량', '출고수량', '수량'], 8);
 
-                        // v44: 중복 행(Row) 완벽 제거 로직 복구 (동일한 엑셀 여러 번 업로드 시 수량 부풀려짐 원천 방지)
+                        // v51: 중복 데이터 원천 차단 복구 (숨겨진 쌍둥이 행, 중복 파일 업로드로 인한 뻥튀기 완벽 방어)
                         const seenRows = new Set();
                         const validOutboundRows = [];
 
@@ -314,10 +415,12 @@
                                 return;
                             }
                             if (!row || row.length === 0) return;
-                            
+
+                            // 해시 키 생성 (주문번호, 송장번호 등이 포함되므로 진짜 동일한 행만 걸러짐)
                             const uniqueKey = row.map(cell => {
+                                if (cell == null) return '';
                                 if (cell instanceof Date) return cell.getTime();
-                                return String(cell || '').trim();
+                                return String(cell).trim();
                             }).join("|");
 
                             if (!seenRows.has(uniqueKey)) {
@@ -325,16 +428,17 @@
                                 validOutboundRows.push(row);
                             }
                         });
-                        rawOutbound = validOutboundRows; // 중복이 완벽히 걸러진 배열로 교체
+                        rawOutbound = validOutboundRows;
 
                         rawOutbound.forEach((row, idx) => {
                             if (idx === 0 || !row || row.length === 0) return;
                             const d = parseExcelDate(row[h2DateIdx]);
                             if (d && !isNaN(d.getTime())) {
-                                const dKey = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-                                newUploadedDates.add(dKey);
+                                const ms = d.getTime();
+                                if (ms < minUploadTimeMs) minUploadTimeMs = ms;
+                                if (ms > maxUploadTimeMs) maxUploadTimeMs = ms;
                                 
-                                if (d.getTime() > globalMaxDateObj.getTime()) {
+                                if (ms > globalMaxDateObj.getTime()) {
                                     globalMaxDateObj = d;
                                 }
                             }
@@ -350,9 +454,18 @@
                         latestHistory.items.forEach(item => {
                             const preservedDaily = { ...(item.daily || {}) };
                             
-                            if (isOutboundFile) {
-                                newUploadedDates.forEach(dateStr => {
-                                    delete preservedDaily[dateStr];
+                            if (isOutboundFile && minUploadTimeMs <= maxUploadTimeMs) {
+                                const minD = new Date(minUploadTimeMs);
+                                const maxD = new Date(maxUploadTimeMs);
+                                const minTime = new Date(minD.getFullYear(), minD.getMonth(), minD.getDate(), 0, 0, 0).getTime();
+                                const maxTime = new Date(maxD.getFullYear(), maxD.getMonth(), maxD.getDate(), 23, 59, 59).getTime();
+
+                                Object.keys(preservedDaily).forEach(dKey => {
+                                    const [y, m, dStr] = dKey.split('-');
+                                    const keyTime = new Date(y, m - 1, dStr, 12, 0, 0).getTime();
+                                    if (keyTime >= minTime && keyTime <= maxTime) {
+                                        delete preservedDaily[dKey]; 
+                                    }
                                 });
                             }
                             
@@ -475,7 +588,7 @@
                         else if (isOutboundFile) msg += "(출고수량 단독)";
                         
                         const displayDate = new Date(baseTime).toLocaleDateString();
-                        setToastMessage(`${msg} - 수량 교정 완료 / 기준일: ${displayDate}`);
+                        setToastMessage(`${msg} - 수량 완벽 교정 완료 / 기준일: ${displayDate}`);
                     }
 
                 } catch (error) {
@@ -724,7 +837,7 @@
                     <header className="glass-effect relative z-30 border-b border-slate-200 px-6 py-4 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
                         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
                             <h1 className="text-xl font-extrabold text-slate-800 flex items-center gap-2">
-                                📊 CL 시스템 재고 관리 <span className="text-slate-400 font-semibold text-sm">(v44)</span>
+                                📊 CL 시스템 재고 관리 <span className="text-slate-400 font-semibold text-sm">(v51)</span>
                             </h1>
                             
                             <div className="flex items-center gap-1.5 bg-slate-100 px-2.5 py-1 rounded-full w-fit">
@@ -943,7 +1056,15 @@
 
                         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 mt-6">
                             <div className="mb-4 flex items-center justify-between">
-                                <h4 className="font-extrabold text-slate-800 text-base flex items-center gap-2">📂 엑셀 파일 통합/개별 업데이트</h4>
+                                <div className="flex items-center gap-3">
+                                    <h4 className="font-extrabold text-slate-800 text-base flex items-center gap-2">📂 엑셀 파일 통합/개별 업데이트</h4>
+                                    <button onClick={handleResetDB} className="text-xs text-red-500 hover:text-red-700 font-bold underline px-2 py-0.5 rounded transition-colors">
+                                        DB 전체 초기화
+                                    </button>
+                                    <button onClick={handleCleanDateRange} className="text-xs text-orange-500 hover:text-orange-700 font-bold underline px-2 py-0.5 rounded transition-colors">
+                                        🔧 구간 ghost 제거
+                                    </button>
+                                </div>
                                 <span className="text-xs text-slate-400">데이터는 자동으로 클라우드에 안전하게 저장됩니다.</span>
                             </div>
                             <div className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors relative ${isUploading ? 'border-slate-300 bg-slate-50' : 'border-indigo-300 hover:border-indigo-500 bg-indigo-50/30 cursor-pointer'}`}>
