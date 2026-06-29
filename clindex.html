@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
-    <title>CL 시스템 재고 관리 (v43)</title>
+    <title>CL 시스템 재고 관리 (v44)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&family=Noto+Sans+KR:wght@400;500;700;900&display=swap" rel="stylesheet">
@@ -186,11 +186,14 @@
             const parseExcelDate = (val) => {
                 if (!val) return null;
                 if (val instanceof Date) {
-                    if (!isNaN(val.getTime())) return val;
-                    return null;
+                    // v44: SheetJS Date 객체의 UTC 타임을 로컬 타임으로 재조립 (오후 3시 이후 주문이 다음 날로 넘어가는 타임존 오프셋 버그 수정)
+                    return new Date(val.getUTCFullYear(), val.getUTCMonth(), val.getUTCDate(), val.getUTCHours(), val.getUTCMinutes(), val.getUTCSeconds());
                 }
                 if (typeof val === 'number') {
-                    return new Date((val - 25569) * 86400 * 1000);
+                    // v44: 엑셀 시리얼 넘버를 파싱할 때도 타임존 오차 완벽 방지
+                    const utcMs = Math.round((val - 25569) * 86400 * 1000);
+                    const d = new Date(utcMs);
+                    return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds());
                 }
                 const str = String(val).trim().replace(/\./g, '-').replace(/\//g, '-').replace(" ", "T");
                 const d = new Date(str);
@@ -236,9 +239,11 @@
                             if (!table) {
                                 throw new Error(`[${file.name}] 문서 내에서 표(Table)를 찾을 수 없습니다.`);
                             }
-                            wb = XLSX.utils.table_to_book(table, { raw: true });
+                            // v44: cellDates 활성화로 스크래핑 시에도 날짜 객체 정확히 추출
+                            wb = XLSX.utils.table_to_book(table, { raw: true, cellDates: true });
                         } else {
-                            wb = XLSX.read(fileString, { type: 'binary' });
+                            // v44: cellDates 활성화로 바이너리 파싱 시에도 날짜 객체 정확히 추출
+                            wb = XLSX.read(fileString, { type: 'binary', cellDates: true });
                         }
 
                         const ws = wb.Sheets[wb.SheetNames[0]];
@@ -298,6 +303,29 @@
                         h2DateIdx = findIdxPriority(header2, ['출고일시', '주문일'], 6);
                         h2NameIdx = findIdxPriority(header2, ['자사 상품명', '상품명'], 7);
                         h2QtyIdx = findIdxPriority(header2, ['출고량', '수량'], 8);
+
+                        // v44: 중복 행(Row) 완벽 제거 로직 복구 (동일한 엑셀 여러 번 업로드 시 수량 부풀려짐 원천 방지)
+                        const seenRows = new Set();
+                        const validOutboundRows = [];
+
+                        rawOutbound.forEach((row, idx) => {
+                            if (idx === 0) {
+                                validOutboundRows.push(row);
+                                return;
+                            }
+                            if (!row || row.length === 0) return;
+                            
+                            const uniqueKey = row.map(cell => {
+                                if (cell instanceof Date) return cell.getTime();
+                                return String(cell || '').trim();
+                            }).join("|");
+
+                            if (!seenRows.has(uniqueKey)) {
+                                seenRows.add(uniqueKey);
+                                validOutboundRows.push(row);
+                            }
+                        });
+                        rawOutbound = validOutboundRows; // 중복이 완벽히 걸러진 배열로 교체
 
                         rawOutbound.forEach((row, idx) => {
                             if (idx === 0 || !row || row.length === 0) return;
@@ -447,7 +475,7 @@
                         else if (isOutboundFile) msg += "(출고수량 단독)";
                         
                         const displayDate = new Date(baseTime).toLocaleDateString();
-                        setToastMessage(`${msg} - 겹치는 날짜 완벽 덮어쓰기 완료 / 기준일: ${displayDate}`);
+                        setToastMessage(`${msg} - 수량 교정 완료 / 기준일: ${displayDate}`);
                     }
 
                 } catch (error) {
@@ -696,7 +724,7 @@
                     <header className="glass-effect relative z-30 border-b border-slate-200 px-6 py-4 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
                         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
                             <h1 className="text-xl font-extrabold text-slate-800 flex items-center gap-2">
-                                📊 CL 시스템 재고 관리 <span className="text-slate-400 font-semibold text-sm">(v43)</span>
+                                📊 CL 시스템 재고 관리 <span className="text-slate-400 font-semibold text-sm">(v44)</span>
                             </h1>
                             
                             <div className="flex items-center gap-1.5 bg-slate-100 px-2.5 py-1 rounded-full w-fit">
@@ -720,7 +748,6 @@
                         </div>
                         
                         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full md:w-auto">
-                            {/* v43: 기존 버튼 (좌측) */}
                             <a 
                                 href="https://arxotn-git.github.io/yorgo" 
                                 className="px-4 py-2 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-sm font-bold rounded-lg shadow-sm transition-colors flex justify-center items-center gap-2 whitespace-nowrap"
@@ -729,7 +756,6 @@
                                 로켓 & N배송 재고 현황
                             </a>
                             
-                            {/* v43: 신규 버튼 (우측, 에러 나던 아이콘 정상적이고 안정적인 아이콘으로 교체 및 사이즈 락 적용) */}
                             <a 
                                 href="https://arxotn-git.github.io/receiving/receiving_index.html" 
                                 className="px-4 py-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 text-sm font-bold rounded-lg shadow-sm transition-colors flex justify-center items-center gap-2 whitespace-nowrap"
